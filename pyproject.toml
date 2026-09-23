@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "oh-my-laya"
+version = "0.1.0"
+description = "Install local Laya-MLX and connect it to coding agents"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+  "laya-mlx==0.2.0",
+  "mcp>=2,<3",
+]
+
+[project.scripts]
+oh-my-laya-mcp = "laya_agent_bridge.server:main"
+oh-my-laya-download = "laya_agent_bridge.download:main"
+oh-my-laya-install = "laya_agent_bridge.installer:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/laya_agent_bridge"]

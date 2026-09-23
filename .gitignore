@@ -1,0 +1,10 @@
+.DS_Store
+.pytest_cache/
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+build/
+*.egg-info/
+integrations/pi/node_modules/
+
