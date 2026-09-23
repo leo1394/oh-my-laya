@@ -42,6 +42,14 @@ sh -c "$(wget -qO- https://raw.githubusercontent.com/leo1394/oh-my-laya/master/t
 
 `all` 和 `both` 都表示注册到所有已检测到的客户端。安装完成后，请重启对应 Agent 会话。
 
+安装完成后，启动本地贪吃蛇演示：
+
+```bash
+laya --snake
+```
+
+安装器自动补齐 demo 依赖并配置已安装的模型，无需手动查找路径。使用 `laya --snake --help` 查看演示选项。如果安装器提示命令目录不在 PATH，按其提示配置一次即可。
+
 安装时会为每个选中的客户端分别询问 **Use Alpha Squad + Laya with /goal? [y/N]**。
 选择 `y`，将 Goal workflow 写入该客户端的全局指令文件，自动使用真实的 Skill 安装路径；
 已有同名小节会先备份再替换，其他内容保持不变。选择 `n` 则不修改全局规则。

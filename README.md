@@ -42,6 +42,14 @@ For non-interactive installation:
 
 Both `all` and `both` register every detected client. Restart the affected agent sessions after installation.
 
+Start the local Snake demo after installation:
+
+```bash
+laya --snake
+```
+
+Demo dependencies and the installed model are configured automatically. Use `laya --snake --help` for demo options. If the installer reports that the command directory is missing from PATH, follow its displayed PATH instruction once.
+
 For each selected client, the installer asks **Use Alpha Squad + Laya with /goal? [y/N]**.
 Choose `y` to add the Goal workflow to that client's global instructions, using actual
 installed skill paths. Existing Goal rules are backed up and replaced; other

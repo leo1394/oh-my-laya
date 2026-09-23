@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 dependencies = [
-  "laya-mlx==0.2.0",
+  "laya-mlx[demo]==0.2.0",
   "mcp>=2,<3",
 ]
 

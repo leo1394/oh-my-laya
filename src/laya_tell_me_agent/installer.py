@@ -4,6 +4,7 @@ import json
 import os
 import platform
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -536,6 +537,39 @@ def ensure_platform():
         raise RuntimeError("Python 3.11 or newer is required")
 
 
+def install_launcher(install_dir: Path, model: str, dry_run: bool, bin_dir=None):
+    bin_dir = bin_dir or Path.home() / ".local" / "bin"
+    target = bin_dir / "laya"
+    marker = "# Managed by oh-my-laya: snake launcher v1\n"
+    if target.is_symlink() or (target.exists() and (
+            not target.is_file() or not target.read_text().startswith("#!/bin/sh\n" + marker))):
+        raise RuntimeError(f"Refusing to overwrite an existing laya command: {target}")
+    snake = shlex.quote(str(install_dir / "venv" / "bin" / "laya-snake"))
+    model_dir = shlex.quote(str(install_dir / "models" / model))
+    content = ("#!/bin/sh\n" + marker + 'case "${1:-}" in\n'
+               '  --snake) shift\n'
+               f'    exec {snake} --model {model_dir} "$@" ;;\n'
+               '  ""|-h|--help) echo "Usage: laya --snake [demo options]" ;;\n'
+               '  *) echo "Usage: laya --snake [demo options]" >&2; exit 2 ;;\n'
+               'esac\n')
+    print(f"+ {'would install' if dry_run else 'install'} laya --snake at {target}")
+    if dry_run:
+        return
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=bin_dir, prefix=".laya-", delete=False) as stream:
+        temporary = Path(stream.name)
+        stream.write(content.encode())
+    try:
+        temporary.chmod(0o755)
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    if str(bin_dir) not in os.environ.get("PATH", "").split(os.pathsep):
+        print(f"! Add the command directory to PATH: export PATH={shlex.quote(str(bin_dir))}:\"$PATH\"")
+    elif shutil.which("laya") != str(target):
+        print(f"! Another laya command takes precedence in PATH; use {target} or adjust PATH.")
+
+
 def install_runtime(source_root: Path, install_dir: Path, model: str, dry_run: bool):
     venv_dir = install_dir / "venv"
     model_dir = install_dir / "models" / model
@@ -559,6 +593,7 @@ def install_runtime(source_root: Path, install_dir: Path, model: str, dry_run: b
                 str(model_dir),
             ]
         )
+    install_launcher(install_dir, model, dry_run)
     return server, model_dir
 
 
@@ -606,6 +641,7 @@ def main(argv=None):
     )
 
     install_dir = args.install_dir.expanduser().resolve()
+    install_launcher(install_dir, args.model, True)
     if args.advice_policy and "codex" not in targets:
         raise ValueError("--advice-policy requires the codex target")
     goal_targets = set()
