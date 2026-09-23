@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -11,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .models import MODELS
+from .advisor import POLICIES, preferences
 
 
 SERVER_NAME = "oh-my-laya"
@@ -163,6 +165,26 @@ def register_codex(executable: str, server: Path, model_dir: Path, dry_run: bool
     )
 
 
+def register_advisor_skill(source_root: Path, dry_run: bool, skills_dir=None):
+    source = source_root / "skills" / "laya-model-advisor" / "SKILL.md"
+    content = source.read_bytes()
+    destination = (skills_dir or Path.home() / ".agents" / "skills") / "laya-model-advisor"
+    target = destination / "SKILL.md"
+    marker = destination / ".oh-my-laya.sha256"
+    if destination.is_symlink() or target.is_symlink() or marker.is_symlink():
+        raise RuntimeError(f"Refusing to replace a symlinked skill: {destination}")
+    if destination.exists():
+        if not target.is_file() or not marker.is_file():
+            raise RuntimeError(f"Unmanaged skill already exists: {destination}")
+        if hashlib.sha256(target.read_bytes()).hexdigest() != marker.read_text().strip():
+            raise RuntimeError(f"Skill has local changes; preserve or move it first: {target}")
+    print(f"+ install advisor skill at {destination}")
+    if not dry_run:
+        destination.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        marker.write_text(hashlib.sha256(content).hexdigest() + "\n")
+
+
 def register_claude(executable: str, server: Path, model_dir: Path, dry_run: bool):
     run(
         [executable, "mcp", "remove", SERVER_NAME, "--scope", "user"],
@@ -246,7 +268,7 @@ def install_runtime(source_root: Path, install_dir: Path, model: str, dry_run: b
             [
                 str(python),
                 "-m",
-                "laya_agent_bridge.download",
+                "laya_tell_me_agent.download",
                 "--model",
                 model,
                 "--destination",
@@ -272,6 +294,10 @@ def build_parser():
         default=Path("~/.local/share/oh-my-laya").expanduser(),
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--advice-policy", choices=POLICIES,
+        help="Codex recommendations: always ask, conditional ask, or auto accept",
+    )
     return parser
 
 
@@ -292,6 +318,11 @@ def main(argv=None):
     )
 
     install_dir = args.install_dir.expanduser().resolve()
+    if args.advice_policy and "codex" not in targets:
+        raise ValueError("--advice-policy requires the codex target")
+    if "codex" in targets:
+        # Validate ownership before downloading or changing client registrations.
+        register_advisor_skill(source_root, dry_run=True)
     server, model_dir = install_runtime(
         source_root, install_dir, args.model, args.dry_run
     )
@@ -301,6 +332,11 @@ def main(argv=None):
         executable = by_key[target].executable
         if target == "codex":
             register_codex(executable, server, model_dir, args.dry_run)
+            register_advisor_skill(source_root, args.dry_run)
+            if args.advice_policy:
+                print(f"+ set model advice policy: {args.advice_policy}")
+                if not args.dry_run:
+                    preferences(args.advice_policy)
         elif target == "claude":
             register_claude(executable, server, model_dir, args.dry_run)
         elif target == "dsh":

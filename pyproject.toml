@@ -15,9 +15,9 @@ dependencies = [
 ]
 
 [project.scripts]
-oh-my-laya-mcp = "laya_agent_bridge.server:main"
-oh-my-laya-download = "laya_agent_bridge.download:main"
-oh-my-laya-install = "laya_agent_bridge.installer:main"
+oh-my-laya-mcp = "laya_tell_me_agent.server:main"
+oh-my-laya-download = "laya_tell_me_agent.download:main"
+oh-my-laya-install = "laya_tell_me_agent.installer:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/laya_agent_bridge"]
+packages = ["src/laya_tell_me_agent"]

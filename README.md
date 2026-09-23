@@ -1,6 +1,6 @@
 # Oh My Laya
 
-[English](README.md) | [Chinese](README-ZH.md)
+[English](README.md) | [中文](README-ZH.md)
 
 > One command to bring local Laya decision-making to your coding agents.
 
@@ -50,13 +50,33 @@ Ask your agent:
 Use Laya to classify the current change as low, medium, or high risk, and decide whether human review is needed.
 ```
 
-Oh My Laya provides one tool:
+Oh My Laya provides these tools:
 
 | Tool | Purpose |
 | --- | --- |
 | `laya_tell_me` | `choice` classification, `score` ranking, and `noul` yes/no probability |
+| `laya_advisor_preferences` | Read or change model recommendation preferences |
 
 Laya does not generate code and must not authorize destructive, publishing, or other consequential actions. The multilingual model has a total context budget of 1,024 tokens, so ask the agent to summarize long inputs first.
+
+## Codex Model Advisor
+
+Installing with `--targets codex` also installs the advisor skill. Restart Codex, then ask:
+
+```text
+Use $laya-model-advisor for each new task in this session. Ask me to choose a recommendation policy.
+```
+
+Choose **always ask**, **ask only for high complexity, high risk or uncertainty**, or **automatically accept recommendations**. You can change this preference in chat at any time; it persists across sessions. When asking, the advisor lists verified available models and lets you choose a model and its supported reasoning effort. Without a user-defined model tier mapping, it recommends effort changes on the current model; you can still choose another listed model.
+
+This is advisory: accepting a recommendation does **not** switch the active model. Apply it in Codex's model picker. Popups require host support; otherwise the agent asks in chat. Session advice is skill-driven, not a guaranteed per-message hook. If the model list cannot be verified, the advisor asks you to provide it. These preferences never bypass execution approvals.
+
+Optional installation preference (default: ask on first use):
+
+```bash
+./install.sh --targets codex --advice-policy conditional
+# Other values: always, auto
+```
 
 ## Common Options
 
