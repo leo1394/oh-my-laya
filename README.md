@@ -12,6 +12,22 @@ It supports Codex, Claude Code, DeepSeek Harness (DSH), and pi-agent. The instal
 
 Requirements: Apple Silicon, macOS 14+, and Python 3.11+. The default multilingual FP16 checkpoint is approximately 678 MB.
 
+Install and register with all detected clients:
+
+```bash
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/leo1394/oh-my-laya/master/tools/oh-my-laya.sh)"
+```
+
+Without curl, use wget:
+
+```bash
+sh -c "$(wget -qO- https://raw.githubusercontent.com/leo1394/oh-my-laya/master/tools/oh-my-laya.sh)"
+```
+
+Install your preferred agent client first; Oh My Laya connects to clients already on your machine.
+
+Already cloned the repository? Run the interactive installer from its root:
+
 ```bash
 ./install.sh
 ```

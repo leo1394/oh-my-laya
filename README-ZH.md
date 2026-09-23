@@ -12,6 +12,22 @@ Oh My Laya 基于 [laya-mlx](https://github.com/mizorewww/laya-mlx)，自动下�
 
 要求：Apple Silicon、macOS 14+、Python 3.11+。默认多语言 FP16 权重约 678 MB。
 
+一键安装并注册到所有已检测到的客户端：
+
+```bash
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/leo1394/oh-my-laya/master/tools/oh-my-laya.sh)"
+```
+
+没有 curl 时使用 wget：
+
+```bash
+sh -c "$(wget -qO- https://raw.githubusercontent.com/leo1394/oh-my-laya/master/tools/oh-my-laya.sh)"
+```
+
+请先安装你要使用的 Agent 客户端，Oh My Laya 会自动接入本机已有的客户端。
+
+已克隆项目？在项目根目录运行交互式安装器：
+
 ```bash
 ./install.sh
 ```
