@@ -46,6 +46,34 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  async function callLaya(name: string, parameters: Record<string, unknown>) {
+    const connected = await getClient();
+    const result = await connected.callTool({
+      name,
+      arguments: parameters,
+    });
+
+    const content = Array.isArray(result.content) ? result.content : [];
+    const text = content
+      .filter(
+        (item): item is { type: "text"; text: string } =>
+          typeof item === "object" &&
+          item !== null &&
+          "type" in item &&
+          item.type === "text" &&
+          "text" in item &&
+          typeof item.text === "string",
+      )
+      .map((item) => item.text)
+      .join("\n");
+
+    if (result.isError) throw new Error(text || "Laya MCP request failed");
+    return {
+      content: [{ type: "text" as const, text: text || JSON.stringify(result.structuredContent) || "" }],
+      details: { structuredContent: result.structuredContent },
+    };
+  }
+
   pi.registerTool({
     name: "laya_tell_me",
     label: "Laya Tell Me",
@@ -54,35 +82,30 @@ export default function (pi: ExtensionAPI) {
       "Use for bounded classification and risk triage, not text generation or authorization.",
     parameters: Type.Object({
       state: Type.Any({ description: "Compact text, JSON object, or conversation state" }),
-      questions: Type.Record(Type.String(), Type.Any(), {
+      questions: Type.Optional(Type.Record(Type.String(), Type.Any(), {
         description: "Question definitions keyed by question id",
-      }),
+      })),
+      advisor: Type.Optional(Type.Record(Type.String(), Type.Any(), {
+        description: "Host-verified model catalog, current model/effort and optional role",
+      })),
     }),
     async execute(_toolCallId, params) {
-      const connected = await getClient();
-      const result = await connected.callTool({
-        name: "laya_tell_me",
-        arguments: params,
-      });
+      return callLaya("laya_tell_me", params);
+    },
+  });
 
-      const content = Array.isArray(result.content) ? result.content : [];
-      const text = content
-        .filter(
-          (item): item is { type: "text"; text: string } =>
-            typeof item === "object" &&
-            item !== null &&
-            "type" in item &&
-            item.type === "text" &&
-            "text" in item &&
-            typeof item.text === "string",
-        )
-        .map((item) => item.text)
-        .join("\n");
-
-      return {
-        content: [{ type: "text", text: text || JSON.stringify(result.structuredContent) }],
-        details: { structuredContent: result.structuredContent },
-      };
+  pi.registerTool({
+    name: "laya_advisor_preferences",
+    label: "Laya Advisor Preferences",
+    description: "Read preferences, or save policy/ceiling/squad only after explicit Confirm and continue. Never grants execution permissions.",
+    parameters: Type.Object({
+      policy: Type.Optional(Type.Union([Type.Literal("always"), Type.Literal("conditional"), Type.Literal("auto")])),
+      ceiling: Type.Optional(Type.Object({ model: Type.String(), reasoning_effort: Type.String() })),
+      models: Type.Optional(Type.Array(Type.Record(Type.String(), Type.Any()))),
+      squad: Type.Optional(Type.Record(Type.String(), Type.Any())),
+    }),
+    async execute(_toolCallId, params) {
+      return callLaya("laya_advisor_preferences", params);
     },
   });
 

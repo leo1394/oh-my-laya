@@ -42,6 +42,34 @@ For non-interactive installation:
 
 Both `all` and `both` register every detected client. Restart the affected agent sessions after installation.
 
+For each selected client, the installer asks **Use Alpha Squad + Laya with /goal? [y/N]**.
+Choose `y` to add the Goal workflow to that client's global instructions, using actual
+installed skill paths. Existing Goal rules are backed up and replaced; other
+sections are preserved. Choose `n` to leave global instructions unchanged.
+
+For unattended installation, choose explicitly:
+
+```bash
+./install.sh --targets all --goal-workflow yes
+# Or leave global instructions unchanged:
+./install.sh --targets all --goal-workflow no
+```
+
+| Client | Default global instructions |
+| --- | --- |
+| Codex | `~/.codex/AGENTS.md` |
+| Claude Code | `~/.claude/CLAUDE.md` |
+| DSH | `~/.dsh/AGENTS.md` |
+| pi-agent | `~/.pi/agent/AGENTS.md` |
+
+Custom client home directories are respected. After opting in, start a new session
+and use `/goal` for a task. Codex, Claude Code and DSH keep their native Goal
+implementation (the installed version/profile must support it). Pi gets a `/goal`
+prompt template, **not a persistent Goal loop**; conflicting custom prompts are
+preserved and reported. Model selection and delegation require the host's verified
+capabilities; unavailable features need an explicit manual fallback. Without an
+interactive terminal, global rules are unchanged unless explicitly opted in.
+
 ## Use It
 
 Ask your agent:
@@ -61,7 +89,10 @@ Laya does not generate code and must not authorize destructive, publishing, or o
 
 ## Codex Model Advisor
 
-Installing with `--targets codex` also installs the advisor skill. Restart Codex, then ask:
+Each selected client gets the advisor skill and the latest
+[Alpha Squad](https://github.com/leo1394/skill-alpha-squad-coding-craft) from GitHub.
+Existing unmanaged or locally modified Alpha Squad installations are preserved.
+Restart the client. In Codex, ask:
 
 ```text
 Use $laya-model-advisor for each new task in this session. Ask me to choose a recommendation policy.
@@ -71,12 +102,31 @@ Choose **always ask**, **ask only for high complexity, high risk or uncertainty*
 
 This is advisory: accepting a recommendation does **not** switch the active model. Apply it in Codex's model picker. Popups require host support; otherwise the agent asks in chat. Session advice is skill-driven, not a guaranteed per-message hook. If the model list cannot be verified, the advisor asks you to provide it. These preferences never bypass execution approvals.
 
-Optional installation preference (default: ask on first use):
+Setup uses one window: policy → model → reasoning → **Confirm and continue**. In automatic mode, model and effort are still required: advice stays on the selected model and never exceeds the selected effort ceiling (proposed default: `high`). Locally disabled efforts remain hidden. Existing automatic preferences without a ceiling require setup again.
+
+Optional installation preference (default: ask on first use; `auto` still requires ceiling setup):
 
 ```bash
 ./install.sh --targets codex --advice-policy conditional
 # Other values: always, auto
 ```
+
+### Route subagent models
+
+```text
+Use $alpha-squad-coding-craft with $laya-model-advisor. Configure Laya-based subagent routing.
+```
+
+One window configures policy, execution model/effort, reviewer model/effort, and
+**Confirm and continue**. The main session stays unchanged. Execution agents use
+Laya's accepted recommendations; auto stays within your chosen model and effort
+ceiling. Difficult, high-risk or uncertain reviews use the main session's exact
+model/effort; ordinary reviews use the configured reviewer. Alpha Squad assigns
+subagent models through the host, not through a main-session model switch.
+
+Without Laya, Alpha Squad still works with manual model selection in one window.
+Rerun the installer to fetch upstream updates; local customizations are never
+silently overwritten. A network failure is reported, not treated as an update.
 
 ## Common Options
 

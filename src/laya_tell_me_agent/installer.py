@@ -5,14 +5,19 @@ import os
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import venv
 from dataclasses import dataclass
 from pathlib import Path
+from urllib import request
+import zipfile
 
 from .models import MODELS
 from .advisor import POLICIES, preferences
+from .goal_workflow import client_home, install_goal_workflow, select_goal_workflow
 
 
 SERVER_NAME = "oh-my-laya"
@@ -185,6 +190,270 @@ def register_advisor_skill(source_root: Path, dry_run: bool, skills_dir=None):
         marker.write_text(hashlib.sha256(content).hexdigest() + "\n")
 
 
+ALPHA_SQUAD_REPOSITORY = "https://github.com/leo1394/skill-alpha-squad-coding-craft.git"
+ALPHA_SQUAD_ARCHIVE = "https://codeload.github.com/leo1394/skill-alpha-squad-coding-craft/zip/HEAD"
+ALPHA_SQUAD_PATH = Path("skills") / "alpha-squad-coding-craft"
+MAX_ALPHA_ARCHIVE_BYTES = 20 * 1024 * 1024
+MAX_ALPHA_EXTRACTED_BYTES = 100 * 1024 * 1024
+MAX_ALPHA_FILES = 1000
+
+
+def _alpha_manifest(source: Path):
+    skill = source / "SKILL.md"
+    if not skill.is_file() or skill.is_symlink():
+        raise RuntimeError(f"Downloaded alpha skill is missing a regular SKILL.md: {source}")
+    files = {}
+    directories = []
+    for path in sorted(source.rglob("*")):
+        relative = path.relative_to(source).as_posix()
+        if path.is_symlink():
+            raise RuntimeError(f"Downloaded alpha skill contains a symlink: {path}")
+        if path.is_dir():
+            directories.append(relative)
+        elif path.is_file():
+            files[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+        else:
+            raise RuntimeError(f"Downloaded alpha skill contains an unsupported path: {path}")
+    return {"directories": directories, "files": files}
+
+
+def _read_alpha_manifest(marker: Path):
+    try:
+        manifest = json.loads(marker.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(manifest, dict):
+        return None
+    files = manifest.get("files")
+    directories = manifest.get("directories")
+    if not isinstance(files, dict) or not isinstance(directories, list):
+        return None
+    if (not all(isinstance(path, str) and isinstance(digest, str)
+                for path, digest in files.items())
+            or not all(isinstance(path, str) for path in directories)):
+        return None
+    return manifest
+
+
+def _alpha_skill_state(destination: Path):
+    marker = destination / ".oh-my-laya.manifest.json"
+    if destination.is_symlink() or marker.is_symlink():
+        return "protected", "destination or manifest is a symlink"
+    if not destination.exists():
+        return "absent", None
+    if not destination.is_dir():
+        return "protected", "destination is not a directory"
+    if not marker.is_file():
+        return "protected", "unmanaged skill already exists"
+    manifest = _read_alpha_manifest(marker)
+    if manifest is None:
+        return "protected", "manifest is invalid or locally changed"
+
+    expected_files = set(manifest["files"])
+    expected_directories = set(manifest["directories"])
+    actual_files = set()
+    actual_directories = set()
+    for path in destination.rglob("*"):
+        relative = path.relative_to(destination).as_posix()
+        if relative == marker.name:
+            continue
+        if path.is_symlink():
+            return "protected", f"local symlink exists: {path}"
+        if path.is_dir():
+            actual_directories.add(relative)
+        elif path.is_file():
+            actual_files.add(relative)
+        else:
+            return "protected", f"unsupported local path exists: {path}"
+    if actual_files != expected_files or actual_directories != expected_directories:
+        return "protected", "skill has local files or removals"
+    for relative, digest in manifest["files"].items():
+        path = destination / relative
+        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            return "protected", f"skill has local changes: {path}"
+    return "managed", manifest
+
+
+def _write_alpha_skill(source: Path, destination: Path, manifest):
+    for relative in manifest["directories"]:
+        (destination / relative).mkdir(parents=True, exist_ok=True)
+    for relative in manifest["files"]:
+        (destination / relative).write_bytes((source / relative).read_bytes())
+    (destination / ".oh-my-laya.manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    )
+
+
+def _safe_alpha_archive_extract(archive: Path, workspace: Path):
+    source = workspace / "source"
+    source.mkdir(parents=True)
+    files = 0
+    extracted_bytes = 0
+    found = False
+    with zipfile.ZipFile(archive) as bundle:
+        for info in bundle.infolist():
+            path = Path(info.filename)
+            if path.is_absolute() or ".." in path.parts:
+                raise RuntimeError("Alpha squad archive contains an unsafe path")
+            if stat.S_ISLNK(info.external_attr >> 16):
+                raise RuntimeError("Alpha squad archive contains a symlink")
+            parts = path.parts
+            try:
+                index = parts.index("skills")
+            except ValueError:
+                continue
+            if parts[index:index + 2] != ("skills", "alpha-squad-coding-craft"):
+                continue
+            relative = Path(*parts[index + 2:])
+            if not relative.parts:
+                found = True
+                continue
+            target = source / relative
+            if info.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                found = True
+                continue
+            files += 1
+            extracted_bytes += info.file_size
+            if files > MAX_ALPHA_FILES or extracted_bytes > MAX_ALPHA_EXTRACTED_BYTES:
+                raise RuntimeError("Alpha squad archive exceeds extraction limits")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with bundle.open(info) as origin, target.open("wb") as destination:
+                shutil.copyfileobj(origin, destination)
+            found = True
+    if not found or not (source / "SKILL.md").is_file():
+        raise RuntimeError("Alpha squad archive is missing the required skill subtree")
+    return source
+
+
+def _download_alpha_squad_skill(workspace: Path):
+    workspace.mkdir(parents=True, exist_ok=True)
+    git = shutil.which("git")
+    if git:
+        checkout = workspace / "checkout"
+        try:
+            subprocess.run(
+                [git, "clone", "--depth", "1", ALPHA_SQUAD_REPOSITORY, str(checkout)],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+        except subprocess.CalledProcessError as error:
+            detail = error.stderr.strip() or str(error)
+            raise RuntimeError(f"Unable to clone latest alpha squad skill: {detail}") from error
+        source = checkout / ALPHA_SQUAD_PATH
+        ancestors = (checkout, checkout / "skills", source)
+        if any(path.is_symlink() for path in ancestors):
+            raise RuntimeError("Latest alpha squad repository contains a symlinked skill path")
+        if not source.is_dir():
+            raise RuntimeError("Latest alpha squad repository is missing the required skill subtree")
+        return source
+
+    archive = workspace / "alpha-squad.zip"
+    try:
+        with request.urlopen(ALPHA_SQUAD_ARCHIVE, timeout=30) as response, archive.open("wb") as output:
+            while chunk := response.read(64 * 1024):
+                if output.tell() + len(chunk) > MAX_ALPHA_ARCHIVE_BYTES:
+                    raise RuntimeError("Alpha squad archive exceeds download limit")
+                output.write(chunk)
+    except OSError as error:
+        raise RuntimeError(f"Unable to download latest alpha squad skill: {error}") from error
+    try:
+        return _safe_alpha_archive_extract(archive, workspace)
+    except zipfile.BadZipFile as error:
+        raise RuntimeError("Downloaded alpha squad archive is invalid") from error
+
+
+def _install_alpha_skill_atomically(
+    source: Path,
+    destination: Path,
+    manifest,
+    expected_state,
+    expected_manifest,
+):
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".alpha-squad-staging-", dir=destination.parent))
+    backup = None
+    try:
+        _write_alpha_skill(source, staging, manifest)
+        current_state, current_manifest = _alpha_skill_state(destination)
+        if (current_state != expected_state
+                or (expected_state == "managed"
+                    and current_manifest != expected_manifest)):
+            raise RuntimeError(
+                f"Alpha squad skill changed during download; refusing to replace: {destination}"
+            )
+        if expected_state == "managed":
+            backup = Path(tempfile.mkdtemp(prefix=".alpha-squad-backup-", dir=destination.parent))
+            backup.rmdir()
+            os.replace(destination, backup)
+        os.replace(staging, destination)
+    except OSError as error:
+        if backup is not None and backup.exists() and not destination.exists():
+            try:
+                os.replace(backup, destination)
+            except OSError as rollback_error:
+                raise RuntimeError(
+                    f"Alpha squad install failed and rollback failed; backup retained at {backup}: "
+                    f"{rollback_error}"
+                ) from error
+        raise
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+    if backup is not None and backup.exists():
+        state, _ = _alpha_skill_state(backup)
+        if state == "managed":
+            try:
+                shutil.rmtree(backup)
+            except OSError as error:
+                print(f"! keep alpha squad backup at {backup}: {error}")
+
+
+def register_alpha_squad_skill(
+    dry_run: bool,
+    codex_skills_dir=None,
+    agents_skills_dir=None,
+):
+    codex_home = Path(os.environ.get("CODEX_HOME") or "~/.codex").expanduser()
+    codex_skills = (
+        Path(codex_skills_dir) if codex_skills_dir else codex_home / "skills"
+    )
+    agents_skills = (
+        Path(agents_skills_dir)
+        if agents_skills_dir else Path.home() / ".agents" / "skills"
+    )
+    candidates = list(dict.fromkeys([
+        codex_skills / "alpha-squad-coding-craft",
+        agents_skills / "alpha-squad-coding-craft",
+    ]))
+    states = [
+        (destination, *_alpha_skill_state(destination))
+        for destination in candidates
+    ]
+    existing = [item for item in states if item[1] != "absent"]
+    if len(existing) > 1:
+        locations = ", ".join(str(item[0]) for item in existing)
+        print(f"! skip alpha squad skill: duplicate existing locations: {locations}")
+        return False
+    destination, state, detail = existing[0] if existing else (candidates[0], "absent", None)
+    if state == "protected":
+        print(f"! skip alpha squad skill at {destination}: {detail}")
+        return False
+    action = "update" if state == "managed" else "install"
+    print(f"+ {action} alpha squad skill at {destination}")
+    if dry_run:
+        return True
+    print("+ fetch latest alpha squad skill")
+    with tempfile.TemporaryDirectory(prefix="oh-my-laya-alpha-") as temporary:
+        source = _download_alpha_squad_skill(Path(temporary))
+        manifest = _alpha_manifest(source)
+        _install_alpha_skill_atomically(
+            source, destination, manifest, state, detail
+        )
+    return True
+
+
 def register_claude(executable: str, server: Path, model_dir: Path, dry_run: bool):
     run(
         [executable, "mcp", "remove", SERVER_NAME, "--scope", "user"],
@@ -206,6 +475,21 @@ def register_claude(executable: str, server: Path, model_dir: Path, dry_run: boo
         ],
         dry_run=dry_run,
     )
+
+
+def register_client_skills(source_root, dry_run, client):
+    if client == "codex":
+        register_advisor_skill(source_root, dry_run)
+        return register_alpha_squad_skill(dry_run)
+    root = client_home(client) / "skills"
+    register_advisor_skill(source_root, dry_run, root)
+    return register_alpha_squad_skill(dry_run, root, root)
+
+
+def configure_goal(client, dry_run):
+    if client == "codex":
+        return install_goal_workflow(dry_run=dry_run)
+    return install_goal_workflow(dry_run=dry_run, client=client)
 
 
 def register_dsh(server: Path, model_dir: Path, install_dir: Path, dry_run: bool):
@@ -295,6 +579,10 @@ def build_parser():
     )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
+        "--goal-workflow", choices=("yes", "no"),
+        help="opt in/out of /goal rules for every selected client; otherwise ask per client",
+    )
+    parser.add_argument(
         "--advice-policy", choices=POLICIES,
         help="Codex recommendations: always ask, conditional ask, or auto accept",
     )
@@ -320,9 +608,13 @@ def main(argv=None):
     install_dir = args.install_dir.expanduser().resolve()
     if args.advice_policy and "codex" not in targets:
         raise ValueError("--advice-policy requires the codex target")
-    if "codex" in targets:
+    goal_targets = set()
+    for target in targets:
+        if select_goal_workflow(args.goal_workflow, args.dry_run, client=target):
+            goal_targets.add(target)
+            configure_goal(target, True)
         # Validate ownership before downloading or changing client registrations.
-        register_advisor_skill(source_root, dry_run=True)
+        register_client_skills(source_root, True, target)
     server, model_dir = install_runtime(
         source_root, install_dir, args.model, args.dry_run
     )
@@ -332,7 +624,6 @@ def main(argv=None):
         executable = by_key[target].executable
         if target == "codex":
             register_codex(executable, server, model_dir, args.dry_run)
-            register_advisor_skill(source_root, args.dry_run)
             if args.advice_policy:
                 print(f"+ set model advice policy: {args.advice_policy}")
                 if not args.dry_run:
@@ -350,6 +641,9 @@ def main(argv=None):
                 model_dir,
                 args.dry_run,
             )
+        register_client_skills(source_root, args.dry_run, target)
+        if target in goal_targets:
+            configure_goal(target, args.dry_run)
 
     print()
     print(f"Installed model: {args.model}")

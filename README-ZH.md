@@ -42,6 +42,31 @@ sh -c "$(wget -qO- https://raw.githubusercontent.com/leo1394/oh-my-laya/master/t
 
 `all` 和 `both` 都表示注册到所有已检测到的客户端。安装完成后，请重启对应 Agent 会话。
 
+安装时会为每个选中的客户端分别询问 **Use Alpha Squad + Laya with /goal? [y/N]**。
+选择 `y`，将 Goal workflow 写入该客户端的全局指令文件，自动使用真实的 Skill 安装路径；
+已有同名小节会先备份再替换，其他内容保持不变。选择 `n` 则不修改全局规则。
+
+无人值守安装可显式选择：
+
+```bash
+./install.sh --targets all --goal-workflow yes
+# 或保持全局规则不变：
+./install.sh --targets all --goal-workflow no
+```
+
+| 客户端 | 默认全局指令文件 |
+| --- | --- |
+| Codex | `~/.codex/AGENTS.md` |
+| Claude Code | `~/.claude/CLAUDE.md` |
+| DSH | `~/.dsh/AGENTS.md` |
+| pi-agent | `~/.pi/agent/AGENTS.md` |
+
+支持客户端自定义配置目录。启用后，新开会话使用 `/goal` 开始任务。
+Codex、Claude Code 和 DSH 保留原生 Goal 实现，所装版本／配置需支持该功能。
+pi 安装 `/goal` 提示模板，**不是持久 Goal 循环**；已有冲突模板会保留并报错。
+模型选择和子代理调用取决于宿主实际能力，不支持时需用户确认人工回退，不会绕过权限。
+没有交互终端时，默认不修改全局规则。
+
 ## 开始使用
 
 直接告诉 Agent：
@@ -61,7 +86,9 @@ Laya 不生成代码，也不应被用于授权删除、发布等高风险操作
 
 ## Codex 模型建议
 
-使用 `--targets codex` 安装时会同时安装建议 Skill。重启 Codex 后输入：
+每个选中的客户端都会安装建议 Skill，并从 GitHub 获取最新版
+[Alpha Squad](https://github.com/leo1394/skill-alpha-squad-coding-craft)。已有的非托管版本或本地修改会被保留。
+重启客户端。在 Codex 中可输入：
 
 ```text
 使用 $laya-model-advisor 为当前会话的每个新任务评估模型与推理档位，先让我选择建议授权策略。
@@ -71,12 +98,28 @@ Laya 不生成代码，也不应被用于授权删除、发布等高风险操作
 
 这是建议版：接受建议**不等于切换当前模型**，请在 Codex 模型选择器中应用。客户端支持时使用弹窗，否则在对话中询问。会话评估由 Skill 驱动，不是保证每条消息触发的钩子。无法核实模型列表时，会请你提供列表。这些偏好不会绕过执行权限审批。
 
-也可在安装时指定策略（默认首次使用时询问）：
+设置在同一个弹窗内完成：策略 → 模型 → 推理档位 → **Confirm and continue**。全自动模式仍需选择模型与档位：自动建议只使用选定模型，推理不超过所选上限（默认建议 `high`），本地禁用档位不会显示。旧的自动策略没有上限时，需要重新设置。
+
+也可在安装时指定策略（默认首次使用时询问；`auto` 仍需设置上限）：
 
 ```bash
 ./install.sh --targets codex --advice-policy conditional
 # 其他选项：always（每次询问）、auto（全自动接受建议）
 ```
+
+### 为子代理选择模型
+
+```text
+使用 $alpha-squad-coding-craft 配合 $laya-model-advisor，配置 Laya 子代理模型路由。
+```
+
+同一个弹窗完成策略、执行模型／档位、审核模型／档位，最后 **Confirm and continue**。
+主会话模型保持不变。执行类子代理使用已接受的 Laya 建议；自动模式只使用选定模型，推理不超过上限。
+高难度、高风险或不确定的审核使用主会话的原模型与档位，普通审核使用指定的审核配置。
+Alpha Squad 通过宿主设置子代理模型，不会切换主会话模型。
+
+没有 Laya 时，Alpha Squad 仍可独立使用，在同一个弹窗中人工选择模型。
+重新运行安装器即可获取上游更新；本地自定义内容不会被静默覆盖，网络失败也不会被当作更新成功。
 
 ## 常用选项
 
