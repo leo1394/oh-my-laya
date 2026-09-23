@@ -16,6 +16,12 @@ from .models import MODELS
 SERVER_NAME = "oh-my-laya"
 MANAGED_START = "# >>> oh-my-laya >>>"
 MANAGED_END = "# <<< oh-my-laya <<<"
+MACOS_CODEX_EXECUTABLES = (
+    Path("/Applications/Codex.app/Contents/Resources/codex"),
+    Path("/Applications/ChatGPT.app/Contents/Resources/codex"),
+    Path("~/Applications/Codex.app/Contents/Resources/codex"),
+    Path("~/Applications/ChatGPT.app/Contents/Resources/codex"),
+)
 
 
 @dataclass(frozen=True)
@@ -25,9 +31,33 @@ class Client:
     executable: str | None
 
 
+def resolve_executable(
+    name: str,
+    *,
+    which=shutil.which,
+    fallback_paths: tuple[Path, ...] | None = None,
+) -> str | None:
+    executable = which(name)
+    if executable:
+        return executable
+
+    if fallback_paths is None:
+        fallback_paths = (
+            MACOS_CODEX_EXECUTABLES
+            if name == "codex" and platform.system() == "Darwin"
+            else ()
+        )
+
+    for candidate in fallback_paths:
+        path = candidate.expanduser()
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+    return None
+
+
 def detect_clients(which=shutil.which) -> list[Client]:
     return [
-        Client("codex", "Codex", which("codex")),
+        Client("codex", "Codex", resolve_executable("codex", which=which)),
         Client("claude", "Claude Code", which("claude")),
         Client("dsh", "DeepSeek Harness", which("dsh")),
         Client("pi", "pi-agent", which("pi")),

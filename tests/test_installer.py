@@ -1,4 +1,5 @@
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
 from laya_agent_bridge.installer import (
@@ -7,10 +8,25 @@ from laya_agent_bridge.installer import (
     dsh_block,
     parse_targets,
     replace_managed_block,
+    resolve_executable,
 )
 
 
 class InstallerTests(unittest.TestCase):
+    def test_resolve_executable_uses_app_bundle_fallback(self):
+        with TemporaryDirectory() as directory:
+            executable = Path(directory) / "codex"
+            executable.write_text("#!/bin/sh\n")
+            executable.chmod(0o755)
+
+            resolved = resolve_executable(
+                "codex",
+                which=lambda _: None,
+                fallback_paths=(executable,),
+            )
+
+        self.assertEqual(resolved, str(executable))
+
     def test_parse_all_detected_targets(self):
         self.assertEqual(parse_targets("all", {"codex", "pi"}), ["codex", "pi"])
         self.assertEqual(
