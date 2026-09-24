@@ -26,4 +26,4 @@ if [[ -z "$PYTHON_BIN" ]]; then
 fi
 
 export PYTHONPATH="$PROJECT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
-exec "$PYTHON_BIN" -m laya_tell_me_agent.installer --source-root "$PROJECT_DIR" "$@"
+exec "$PYTHON_BIN" -m laya_tell_me.installer --source-root "$PROJECT_DIR" "$@"

@@ -80,7 +80,55 @@ interactive terminal, global rules are unchanged unless explicitly opted in.
 
 ## Use It
 
-Ask your agent:
+### Start with a goal
+
+Enabled `/goal` integration during installation? Open a new Codex session, enter
+Goal mode with `/goal`, and give Codex a task:
+
+```text
+Add search to this project, cover it with tests, and review the changes.
+```
+
+1. **Confirm your strategy.** On first setup, one window collects your Laya policy, execution model and reasoning ceiling, reviewer configuration, and final **Confirm and continue**. Choose automatic recommendations for hands-off subagent routing; saved settings are revalidated on later tasks.
+2. **Let Codex split the work.** Alpha Squad coordinates exploration, implementation, testing, research, and review as needed. Small tasks can stay with the main agent.
+3. **Let Laya guide subagent assignments.** Laya assesses the work; Alpha Squad applies accepted model/effort recommendations through the host. Automatic execution routing uses only your selected model, at or below your reasoning ceiling. The main session's model stays unchanged.
+4. **Complete and review together.** Subagents return focused results to the main agent, which integrates and verifies the work. Difficult, high-risk, or uncertain reviews use the main session's model/effort; ordinary reviews use your configured reviewer.
+
+```mermaid
+flowchart TD
+    goal["/goal + your task"] --> setup["Confirm policy, models and ceilings"]
+    setup --> lead["Orchestrator: current model unchanged"]
+    lead --> split{"Delegate useful subtasks?"}
+    split -->|"No"| solo["Main agent handles task"]
+    split -->|"Yes"| laya["Local Laya: assess and recommend"]
+    laya --> route["Alpha Squad: apply policy and verified assignments"]
+    subgraph squad ["Execution roles — only as needed, within your model / effort ceiling"]
+        explorer["Explorer: map code"]
+        researcher["Researcher: verify facts"]
+        worker["Worker: implement"]
+        tester["Tester: validate"]
+    end
+    route --> explorer & researcher & worker & tester
+    explorer & researcher & worker & tester --> merge["Orchestrator: integrate results"]
+    merge --> review["Reviewer: configured model; main model for difficult reviews"]
+    review --> verify["Orchestrator: verify and deliver"]
+    solo --> verify
+```
+
+Roles show responsibilities, not a fixed parallel schedule. Alpha Squad orders
+dependent work and requests confirmation when your policy requires it.
+
+**Designed to reduce token waste:** local Laya handles lightweight routing decisions,
+while focused subtasks and bounded reasoning help avoid unnecessary large-model
+work. Actual token savings depend on the task; subagent coordination adds overhead,
+so delegation is used only when useful. Model choice alone does not guarantee fewer tokens.
+
+The confirmation window and model assignments require host support. Execution
+approvals still apply; this workflow does not grant permission for sensitive actions.
+
+### Ask Laya directly
+
+For a standalone decision without the squad workflow:
 
 ```text
 Use Laya to classify the current change as low, medium, or high risk, and decide whether human review is needed.
@@ -111,13 +159,6 @@ Choose **always ask**, **ask only for high complexity, high risk or uncertainty*
 This is advisory: accepting a recommendation does **not** switch the active model. Apply it in Codex's model picker. Popups require host support; otherwise the agent asks in chat. Session advice is skill-driven, not a guaranteed per-message hook. If the model list cannot be verified, the advisor asks you to provide it. These preferences never bypass execution approvals.
 
 Setup uses one window: policy → model → reasoning → **Confirm and continue**. In automatic mode, model and effort are still required: advice stays on the selected model and never exceeds the selected effort ceiling (proposed default: `high`). Locally disabled efforts remain hidden. Existing automatic preferences without a ceiling require setup again.
-
-Optional installation preference (default: ask on first use; `auto` still requires ceiling setup):
-
-```bash
-./install.sh --targets codex --advice-policy conditional
-# Other values: always, auto
-```
 
 ### Route subagent models
 

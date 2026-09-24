@@ -586,7 +586,7 @@ def install_runtime(source_root: Path, install_dir: Path, model: str, dry_run: b
             [
                 str(python),
                 "-m",
-                "laya_tell_me_agent.download",
+                "laya_tell_me.download",
                 "--model",
                 model,
                 "--destination",
