@@ -9,7 +9,7 @@ from .advisor import ADVISOR_QUESTIONS, build_advice, preferences, validate_cata
 from .routing import ROLES, build_role_advice, pair_supported
 
 
-mcp = MCPServer("oh-my-laya")
+mcp = MCPServer("oh-my-laya", title="Oh My Laya")
 _agent = None
 _agent_lock = threading.Lock()
 

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 128 128"><title>Oh My Laya — Squad Captain</title><rect width="128" height="128" rx="28" fill="#E5EAD9"/>
+<path fill="#292C25" d="M24 43 17 12 30 19 27 6 42 25 53 30 72 29 88 24 108 9 107 25 113 21 104 51 116 67 108 73 115 82 102 85 99 94 83 105 64 110 44 107 29 98 24 90 12 87 20 77 11 70Z"/>
+<path fill="#ED633E" d="M30 49 26 25 46 39 58 36 73 36 90 33 102 24 97 54 105 66 98 72 104 79 94 80 92 89 79 99 64 103 47 100 35 92 31 83 22 82 29 74 22 70Z"/>
+<path fill="#FFF1D3" d="M32 34 40 40 34 45Z"/>
+<path d="M92 35 99 40 91 45" fill="none" stroke="#FFF1D3" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+<path fill="#FFF1D3" d="M34 60Q44 48 53 57L56 74 47 80 34 74ZM73 57Q84 47 94 58L93 74 80 80 71 73Z"/>
+<ellipse cx="46" cy="65" rx="5" ry="7" fill="#292C25"/>
+<ellipse cx="83" cy="64" rx="5" ry="7" fill="#292C25"/>
+<path fill="#FFF1D3" d="M46 83Q55 74 64 81Q74 74 82 83L78 94 64 99 50 94Z"/>
+<path fill="#292C25" d="M58 81Q64 77 70 81L65 87H63Z"/>
+<path d="M64 85V90M64 90 58 92M64 90 70 92" fill="none" stroke="#292C25" stroke-width="2.5" stroke-linecap="round"/>
+</svg>

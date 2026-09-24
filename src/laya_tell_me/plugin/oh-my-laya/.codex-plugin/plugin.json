@@ -1,0 +1,23 @@
+{
+  "name": "oh-my-laya",
+  "version": "0.1.0",
+  "description": "Native Laya decisions for Codex and squad agents.",
+  "author": {
+    "name": "leo1394"
+  },
+  "repository": "https://github.com/leo1394/oh-my-laya",
+  "license": "MIT",
+  "interface": {
+    "displayName": "Oh My Laya",
+    "shortDescription": "Native Laya decisions for squad agents.",
+    "longDescription": "Local typed decisions, risk assessment and model advice on Apple Silicon. The installer separately manages Laya Model Advisor and the latest Alpha Squad skill from GitHub.",
+    "developerName": "leo1394",
+    "brandColor": "#E58B4B",
+    "composerIcon": "./assets/icon.svg",
+    "logo": "./assets/icon.svg",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "Help me use Oh My Laya."
+  },
+  "mcpServers": "./.mcp.json"
+}

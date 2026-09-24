@@ -42,6 +42,11 @@ For non-interactive installation:
 
 Both `all` and `both` register every detected client. Restart the affected agent sessions after installation.
 
+For Codex, installation adds **Oh My Laya** as a local plugin with its logo and MCP tools.
+Open **Plugins → Personal → Oh My Laya**, then start a new task to use it.
+An up-to-date Codex CLI with `plugin add` support is required. Re-run the same installer to update.
+Laya Model Advisor and Alpha Squad remain separately installed Skills; Alpha Squad is fetched from GitHub.
+
 Start the local Snake demo after installation:
 
 ```bash

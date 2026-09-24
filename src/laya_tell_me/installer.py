@@ -17,6 +17,7 @@ from urllib import request
 import zipfile
 
 from .models import MODELS
+from .codex_plugin import install_codex_plugin
 from .advisor import POLICIES, preferences
 from .goal_workflow import client_home, install_goal_workflow, select_goal_workflow
 
@@ -155,20 +156,7 @@ def run(command: list[str], *, check=True, cwd=None, dry_run=False):
 
 
 def register_codex(executable: str, server: Path, model_dir: Path, dry_run: bool):
-    run([executable, "mcp", "remove", SERVER_NAME], check=False, dry_run=dry_run)
-    run(
-        [
-            executable,
-            "mcp",
-            "add",
-            SERVER_NAME,
-            "--env",
-            f"LAYA_MODEL_DIR={model_dir}",
-            "--",
-            str(server),
-        ],
-        dry_run=dry_run,
-    )
+    install_codex_plugin(executable, server, model_dir, dry_run, run)
 
 
 def register_advisor_skill(source_root: Path, dry_run: bool, skills_dir=None):
@@ -658,6 +646,7 @@ def main(argv=None):
 
     for target in targets:
         executable = by_key[target].executable
+        print(f"+ {'would register' if args.dry_run else 'register'} Oh My Laya ({SERVER_NAME}) with {target}")
         if target == "codex":
             register_codex(executable, server, model_dir, args.dry_run)
             if args.advice_policy:

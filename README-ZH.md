@@ -1,5 +1,10 @@
 # Oh My Laya
 
+Codex 安装会注册带 Logo 和 MCP 工具的本地 **Oh My Laya** 插件。
+安装后在 **Plugins → Personal → Oh My Laya** 查看，并新建任务使用。
+需要支持 `plugin add` 的新版 Codex CLI；更新时重新运行安装命令即可。
+Laya Model Advisor 与 Alpha Squad 仍作为独立 Skill 安装，Alpha Squad 从 GitHub 获取。
+
 [English](README.md) | [简体中文](README-ZH.md)
 
 > 一条命令，把本地 Laya 决策能力接入你的编码 Agent。
