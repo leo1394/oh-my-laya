@@ -28,6 +28,7 @@ class ClientGoalTests(unittest.TestCase):
             stack.enter_context(patch.object(installer, "install_runtime", return_value=(root / "server", root / "model")))
             stack.enter_context(patch.object(installer, "_download_alpha_squad_skill", return_value=alpha))
             commands = stack.enter_context(patch.object(installer, "run"))
+            capability_probe = stack.enter_context(patch("laya_tell_me.codex_plugin.subprocess.run"))
             installer.main(["--source-root", str(source), "--targets", "all", "--goal-workflow", "yes",
                             "--install-dir", str(root / "runtime")])
             for key, home in homes.items():
@@ -39,6 +40,9 @@ class ClientGoalTests(unittest.TestCase):
             self.assertTrue((homes["pi"] / "prompts" / "goal.md").is_file())
             self.assertTrue((root / "runtime" / "pi-package" / "laya.config.json").is_file())
             self.assertTrue(commands.called)
+            capability_probe.assert_called_once_with(
+                ["codex", "plugin", "add", "--help"], check=True, capture_output=True
+            )
 
     def test_each_client_writes_only_its_file_with_native_paths(self):
         with TemporaryDirectory() as temp:
