@@ -1,4 +1,5 @@
 import io
+import hashlib
 import os
 import subprocess
 from pathlib import Path
@@ -136,6 +137,30 @@ class RuntimeInstallTests(unittest.TestCase):
                 [path for path in (root / "runtimes").iterdir()
                  if path.name.startswith("workbench-0.2.0-")], []
             )
+
+    def test_verified_prebuilt_download_is_installed(self):
+        class Response(io.BytesIO):
+            def __enter__(self): return self
+            def __exit__(self, *_): self.close()
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "fixture/laya"
+            fake_binary(source)
+            payload = source.read_bytes()
+            release = {runtime_install.WORKBENCH_VERSION: {
+                "url": "https://example.invalid/immutable/laya",
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }}
+            with patch.object(runtime_install, "TRUSTED_RELEASES", release):
+                binary = runtime_install.install_binary(
+                    root / "install", None,
+                    urlopen=lambda *_args, **_kwargs: Response(payload),
+                )
+            self.assertEqual(binary.read_bytes(), payload)
+            self.assertTrue(os.access(binary, os.X_OK))
+            self.assertEqual(subprocess.check_output([str(binary), "--version"], text=True),
+                             f"laya {runtime_install.WORKBENCH_VERSION}\n")
 
     def test_second_launcher_failure_restores_both_old_wrappers(self):
         with TemporaryDirectory() as directory:

@@ -2,7 +2,7 @@
 
 [English](README.md) | [中文](README-ZH.md)
 
-Workbench V1 is a source preview: [build, use, and verification status](docs/workbench-implementation-status.md). Its prebuilt release is not published yet; installing this checkout currently requires `--workbench-binary`.
+Workbench V1 is available as a [prebuilt preview](https://github.com/leo1394/oh-my-laya/releases/tag/v0.2.0-rc.2). The installer verifies and installs it without Rust or Node.js. See [usage and verification status](docs/workbench-implementation-status.md) for remaining acceptance limits.
 
 > One command to bring local Laya decision-making to your coding agents.
 

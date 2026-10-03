@@ -10,9 +10,14 @@ from urllib import request
 
 
 WORKBENCH_VERSION = "0.2.0"
-# Add a release only after its immutable URL and digest have been independently
-# verified. Until then --workbench-binary is the supported source-development path.
-TRUSTED_RELEASES = {}
+# Public release bytes independently verified on 2026-10-04.
+# Never replace an existing asset; publish a new tag when its bytes change.
+TRUSTED_RELEASES = {
+    "0.2.0": {
+        "url": "https://github.com/leo1394/oh-my-laya/releases/download/v0.2.0-rc.2/laya-macos-arm64",
+        "sha256": "0de89eddc61cb8a4ccf50f9f4c75bffe5c4f35c92330322d1b4b206cf0a68b01",
+    },
+}
 LAUNCHER_MARKER = "# Managed by oh-my-laya: workbench launcher v1\n"
 STDIO_MARKER = "# Managed by oh-my-laya: workbench stdio v1\n"
 LEGACY_LAUNCHER_MARKER = "# Managed by oh-my-laya: snake launcher v1\n"
