@@ -20,6 +20,11 @@ from .models import MODELS
 from .codex_plugin import install_codex_plugin
 from .advisor import POLICIES, preferences
 from .goal_workflow import client_home, install_goal_workflow, select_goal_workflow
+from .runtime_install import (
+    install_binary,
+    install_launchers,
+    validate_launcher_ownership,
+)
 
 
 SERVER_NAME = "oh-my-laya"
@@ -558,18 +563,23 @@ def install_launcher(install_dir: Path, model: str, dry_run: bool, bin_dir=None)
         print(f"! Another laya command takes precedence in PATH; use {target} or adjust PATH.")
 
 
-def install_runtime(source_root: Path, install_dir: Path, model: str, dry_run: bool):
-    venv_dir = install_dir / "venv"
-    model_dir = install_dir / "models" / model
-    python = venv_dir / "bin" / "python"
-    server = venv_dir / "bin" / "oh-my-laya-mcp"
+def _create_venv(runtime: Path):
+    venv.EnvBuilder(with_pip=True).create(runtime)
+    return runtime / "bin" / "python"
 
-    print(f"+ create/update virtual environment at {venv_dir}")
-    if not dry_run:
-        install_dir.mkdir(parents=True, exist_ok=True)
-        if not python.exists():
-            venv.EnvBuilder(with_pip=True).create(venv_dir)
+
+def _install_python_runtime(source_root: Path, install_dir: Path, model: str):
+    model_dir = install_dir / "models" / model
+    runtimes = install_dir / "runtimes"
+    runtimes.mkdir(parents=True, exist_ok=True)
+    runtime = Path(tempfile.mkdtemp(prefix="python-", dir=runtimes))
+    python = runtime / "bin" / "python"
+    try:
+        # Create the venv at its immutable final location. Moving a venv after
+        # pip installation invalidates the absolute shebangs in console scripts.
+        python = _create_venv(runtime)
         run([str(python), "-m", "pip", "install", "--upgrade", str(source_root)])
+        run([str(python), "-c", "import laya_tell_me.worker"])
         run(
             [
                 str(python),
@@ -581,8 +591,46 @@ def install_runtime(source_root: Path, install_dir: Path, model: str, dry_run: b
                 str(model_dir),
             ]
         )
-    install_launcher(install_dir, model, dry_run)
-    return server, model_dir
+        snake = python.parent / "laya-snake"
+        if not snake.is_file() or not os.access(snake, os.X_OK):
+            raise RuntimeError(f"Python runtime is missing the laya-snake entry point: {snake}")
+        return python, model_dir
+    except BaseException:
+        shutil.rmtree(runtime, ignore_errors=True)
+        raise
+
+
+def install_runtime(
+    source_root: Path,
+    install_dir: Path,
+    model: str,
+    dry_run: bool,
+    workbench_binary: Path | None = None,
+):
+    model_dir = install_dir / "models" / model
+    stdio = install_dir / "bin" / "oh-my-laya-mcp"
+    print(f"+ create immutable Python runtime under {install_dir / 'runtimes'}")
+    print(
+        f"+ {'validate local' if workbench_binary else 'download trusted'} "
+        "Laya Workbench binary"
+    )
+    if dry_run:
+        return stdio, model_dir
+    binary = install_binary(install_dir, workbench_binary)
+    python = None
+    try:
+        python, model_dir = _install_python_runtime(source_root, install_dir, model)
+        command, stdio = install_launchers(
+            install_dir, binary, python, model_dir
+        )
+    except BaseException:
+        shutil.rmtree(binary.parent, ignore_errors=True)
+        if python is not None:
+            shutil.rmtree(python.parent.parent, ignore_errors=True)
+        raise
+    print(f"+ install laya command at {command}")
+    print(f"+ install MCP stdio launcher at {stdio}")
+    return stdio, model_dir
 
 
 def build_parser():
@@ -601,6 +649,11 @@ def build_parser():
         default=Path("~/.local/share/oh-my-laya").expanduser(),
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--workbench-binary",
+        type=Path,
+        help="use an explicit locally built laya binary instead of a pinned release artifact",
+    )
     parser.add_argument(
         "--goal-workflow", choices=("yes", "no"),
         help="opt in/out of /goal rules for every selected client; otherwise ask per client",
@@ -629,7 +682,7 @@ def main(argv=None):
     )
 
     install_dir = args.install_dir.expanduser().resolve()
-    install_launcher(install_dir, args.model, True)
+    validate_launcher_ownership(install_dir)
     if args.advice_policy and "codex" not in targets:
         raise ValueError("--advice-policy requires the codex target")
     goal_targets = set()
@@ -640,7 +693,8 @@ def main(argv=None):
         # Validate ownership before downloading or changing client registrations.
         register_client_skills(source_root, True, target)
     server, model_dir = install_runtime(
-        source_root, install_dir, args.model, args.dry_run
+        source_root, install_dir, args.model, args.dry_run,
+        args.workbench_binary,
     )
     by_key = {client.key: client for client in clients}
 

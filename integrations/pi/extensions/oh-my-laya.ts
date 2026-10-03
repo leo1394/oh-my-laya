@@ -109,6 +109,27 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  pi.registerTool({
+    name: "laya_feedback",
+    label: "Laya Feedback",
+    description: "Persist structured execution evidence for an existing Laya decision. Reuse the same event_id when retrying; this does not create human-confirmed labels.",
+    parameters: Type.Object({
+      protocol_version: Type.Literal(1),
+      event_id: Type.String(),
+      decision_id: Type.String(),
+      attempt_ref: Type.String(),
+      kind: Type.Union([
+        Type.Literal("assignment"), Type.Literal("test"), Type.Literal("review"),
+        Type.Literal("outcome"), Type.Literal("user_choice"), Type.Literal("usage"),
+      ]),
+      source: Type.Record(Type.String(), Type.Any()),
+      payload: Type.Record(Type.String(), Type.Any()),
+    }),
+    async execute(_toolCallId, params) {
+      return callLaya("laya_feedback", params);
+    },
+  });
+
   pi.on("session_shutdown", async () => {
     await client?.close();
     client = undefined;

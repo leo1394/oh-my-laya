@@ -1,0 +1,200 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oh-my-laya.local/contracts/feedback.schema.json",
+  "title": "Laya feedback event v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol_version", "event_id", "decision_id", "attempt_ref", "kind", "source", "payload"],
+  "properties": {
+    "protocol_version": {"const": 1},
+    "event_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "decision_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "attempt_ref": {"type": "string", "minLength": 1, "maxLength": 128},
+    "kind": {"enum": ["assignment", "test", "review", "outcome", "user_choice", "usage"]},
+    "source": {"$ref": "#/$defs/source"},
+    "payload": {"type": "object"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"kind": {"const": "assignment"}}},
+      "then": {
+        "required": ["attempt_ref"],
+        "properties": {"payload": {"$ref": "#/$defs/assignmentPayload"}}
+      }
+    },
+    {
+      "if": {"properties": {"kind": {"const": "test"}}},
+      "then": {"properties": {"payload": {"$ref": "#/$defs/testPayload"}}}
+    },
+    {
+      "if": {"properties": {"kind": {"const": "review"}}},
+      "then": {"properties": {"payload": {"$ref": "#/$defs/reviewPayload"}}}
+    },
+    {
+      "if": {"properties": {"kind": {"const": "outcome"}}},
+      "then": {"properties": {"payload": {"$ref": "#/$defs/outcomePayload"}}}
+    },
+    {
+      "if": {"properties": {"kind": {"const": "user_choice"}}},
+      "then": {"properties": {"payload": {"$ref": "#/$defs/userChoicePayload"}}}
+    },
+    {
+      "if": {"properties": {"kind": {"const": "usage"}}},
+      "then": {"properties": {"payload": {"$ref": "#/$defs/usagePayload"}}}
+    }
+  ],
+  "$defs": {
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host", "role", "actor_type"],
+      "properties": {
+        "host": {"type": "string", "minLength": 1, "maxLength": 128},
+        "role": {"type": "string", "minLength": 1, "maxLength": 128},
+        "actor_type": {"const": "agent"}
+      }
+    },
+    "score": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rubric_version", "dimension", "value", "reason", "evidence_refs", "phase", "source_sequence", "observed_at"],
+      "properties": {
+        "rubric_version": {"const": "laya-feedback-v1"},
+        "dimension": {"enum": ["judgment_quality", "model_fit", "outcome_quality"]},
+        "value": {"type": ["integer", "null"], "minimum": 0, "maximum": 2},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 8192},
+        "evidence_refs": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+        "phase": {"enum": ["initial", "revision"]},
+        "source_sequence": {"type": "integer", "minimum": 1},
+        "observed_at": {"type": "string", "format": "date-time", "minLength": 1, "maxLength": 128},
+        "supersedes_event_id": {"type": "string", "minLength": 1, "maxLength": 128}
+      },
+      "allOf": [
+        {"if": {"properties": {"phase": {"const": "revision"}}}, "then": {"required": ["supersedes_event_id"]}},
+        {"if": {"properties": {"phase": {"const": "initial"}}}, "then": {"not": {"required": ["supersedes_event_id"]}}}
+      ]
+    },
+    "common": {
+      "scores": {"type": "array", "items": {"$ref": "#/$defs/score"}},
+      "reason": {"type": ["string", "null"], "minLength": 1, "maxLength": 8192},
+      "evidence_refs": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true}
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "verified", "observed_at"],
+      "properties": {
+        "source": {"enum": ["laya", "user", "policy", "spawn_request", "host"]},
+        "verified": {"type": "boolean"},
+        "observed_at": {"type": "string", "format": "date-time", "minLength": 1, "maxLength": 128},
+        "reference": {"type": ["string", "null"], "maxLength": 1024},
+        "provider": {"type": ["string", "null"], "maxLength": 256},
+        "model_revision": {"type": ["string", "null"], "maxLength": 256},
+        "catalog_version": {"type": ["string", "null"], "maxLength": 256}
+      }
+    },
+    "assignmentPair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "reasoning_effort", "model_observation"],
+      "properties": {
+        "model": {"type": "string", "minLength": 1, "maxLength": 256},
+        "reasoning_effort": {"type": ["string", "null"], "minLength": 1, "maxLength": 64},
+        "model_observation": {"$ref": "#/$defs/observation"}
+      }
+    },
+    "effectivePair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "reasoning_effort", "model_observation"],
+      "properties": {
+        "model": {"type": "string", "minLength": 1, "maxLength": 256},
+        "reasoning_effort": {"type": ["string", "null"], "minLength": 1, "maxLength": 64},
+        "model_observation": {
+          "type": "object", "additionalProperties": false,
+          "required": ["source", "verified", "observed_at"],
+          "properties": {
+            "source": {"const": "host"}, "verified": {"const": true},
+            "observed_at": {"type": "string", "format": "date-time", "minLength": 1, "maxLength": 128},
+            "reference": {"type": ["string", "null"], "maxLength": 1024},
+            "provider": {"type": ["string", "null"], "maxLength": 256},
+            "model_revision": {"type": ["string", "null"], "maxLength": 256},
+            "catalog_version": {"type": ["string", "null"], "maxLength": 256}
+          }
+        }
+      }
+    },
+    "assignmentPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["recommended", "selected", "requested", "effective", "reason", "evidence_refs"],
+      "properties": {
+        "recommended": {"oneOf": [{"$ref": "#/$defs/assignmentPair"}, {"type": "null"}]},
+        "selected": {"oneOf": [{"$ref": "#/$defs/assignmentPair"}, {"type": "null"}]},
+        "requested": {"oneOf": [{"$ref": "#/$defs/assignmentPair"}, {"type": "null"}]},
+        "effective": {"oneOf": [{"$ref": "#/$defs/effectivePair"}, {"type": "null"}]},
+        "parent_attempt_ref": {"type": ["string", "null"], "minLength": 1, "maxLength": 128},
+        "change_reason": {"type": ["string", "null"], "minLength": 1, "maxLength": 8192},
+        "mixed_configuration": {"type": "boolean"},
+        "environment": {"type": ["object", "null"]},
+        "scores": {"$ref": "#/$defs/common/scores"},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 8192},
+        "evidence_refs": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true}
+      }
+    },
+    "testPayload": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "result": {"enum": ["pass", "fail", "unknown"]}, "status": {"enum": ["pass", "fail", "unknown"]},
+        "scope": {"type": "string", "minLength": 1, "maxLength": 8192}, "test_scope": {"type": "string", "minLength": 1, "maxLength": 8192},
+        "code_revision": {"type": ["string", "null"], "minLength": 1, "maxLength": 512}, "summary": {"type": "string", "minLength": 1, "maxLength": 8192},
+        "scores": {"$ref": "#/$defs/common/scores"}, "reason": {"$ref": "#/$defs/common/reason"}, "evidence_refs": {"$ref": "#/$defs/common/evidence_refs"}
+      }
+    },
+    "reviewPayload": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "outcome": {"enum": ["approved", "changes_requested", "rejected", "blocked", "disagree", "no_findings", "ok", "unknown"]},
+        "status": {"enum": ["approved", "changes_requested", "rejected", "blocked", "disagree", "no_findings", "ok", "unknown"]},
+        "disposition": {"enum": ["approved", "changes_requested", "rejected", "blocked", "disagree", "no_findings", "ok", "unknown"]},
+        "proposed_labels": {"type": "object", "additionalProperties": false, "properties": {"complexity": {"enum": ["low", "medium", "high"]}, "risk": {"enum": ["low", "medium", "high"]}, "certainty": {"enum": ["clear", "uncertain"]}}},
+        "summary": {"type": "string", "minLength": 1, "maxLength": 8192},
+        "scores": {"$ref": "#/$defs/common/scores"}, "reason": {"$ref": "#/$defs/common/reason"}, "evidence_refs": {"$ref": "#/$defs/common/evidence_refs"}
+      }
+    },
+    "outcomePayload": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "outcome": {"enum": ["success", "failure", "partial", "cancelled", "unknown"]}, "status": {"enum": ["success", "failure", "partial", "cancelled", "unknown"]},
+        "summary": {"type": "string", "minLength": 1, "maxLength": 8192}, "failure_reason": {"type": ["string", "null"], "minLength": 1, "maxLength": 8192},
+        "scores": {"$ref": "#/$defs/common/scores"}, "reason": {"$ref": "#/$defs/common/reason"}, "evidence_refs": {"$ref": "#/$defs/common/evidence_refs"}
+      }
+    },
+    "userChoicePayload": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "choice": {"enum": ["accepted", "declined", "rejected", "modified", "unknown"]}, "accepted": {"type": "boolean"},
+        "selected": {"type": ["object", "null"]}, "summary": {"type": "string", "minLength": 1, "maxLength": 8192},
+        "scores": {"$ref": "#/$defs/common/scores"}, "reason": {"$ref": "#/$defs/common/reason"}, "evidence_refs": {"$ref": "#/$defs/common/evidence_refs"}
+      }
+    },
+    "usagePayload": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "total_tokens": {"type": ["integer", "null"], "minimum": 0}, "input_tokens": {"type": ["integer", "null"], "minimum": 0}, "output_tokens": {"type": ["integer", "null"], "minimum": 0},
+        "source": {"type": "string", "minLength": 1, "maxLength": 1024}, "source_verified": {"type": "boolean"},
+        "scope": {"enum": ["response", "turn", "attempt", "task", "subtree"]}, "checkpoint": {"type": ["string", "null"], "minLength": 1, "maxLength": 512},
+        "parent_scope": {"type": ["string", "null"], "minLength": 1, "maxLength": 512}, "overlap_status": {"enum": ["non_overlapping", "overlapping", "unknown"]},
+        "scores": {"$ref": "#/$defs/common/scores"}, "reason": {"$ref": "#/$defs/common/reason"}, "evidence_refs": {"$ref": "#/$defs/common/evidence_refs"}
+      },
+      "allOf": [{
+        "if": {"anyOf": [
+          {"required": ["total_tokens"], "properties": {"total_tokens": {"type": "integer"}}},
+          {"required": ["input_tokens"], "properties": {"input_tokens": {"type": "integer"}}},
+          {"required": ["output_tokens"], "properties": {"output_tokens": {"type": "integer"}}}
+        ]},
+        "then": {"required": ["source", "source_verified", "scope", "checkpoint", "overlap_status"], "properties": {"source_verified": {"const": true}}}
+      }]
+    }
+  }
+}

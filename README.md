@@ -2,6 +2,8 @@
 
 [English](README.md) | [中文](README-ZH.md)
 
+Workbench V1 is a source preview: [build, use, and verification status](docs/workbench-implementation-status.md). Its prebuilt release is not published yet; installing this checkout currently requires `--workbench-binary`.
+
 > One command to bring local Laya decision-making to your coding agents.
 
 Oh My Laya builds on [laya-mlx](https://github.com/mizorewww/laya-mlx). It downloads and verifies Hugging Face weights, then registers the `laya_tell_me` tool for classification, scoring, risk routing, and yes/no decisions. Inference runs entirely on your Mac after the model is downloaded.

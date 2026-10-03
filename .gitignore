@@ -5,7 +5,15 @@ __pycache__/
 .venv/
 dist/
 build/
+target/
+web/node_modules/
 *.egg-info/
 tests/
+!tests/
+tests/*
+!tests/*.py
+!tests/*.mjs
+!tests/fixtures/
+tests/fixtures/*
+!tests/fixtures/workbench_worker.py
 integrations/pi/node_modules/
-

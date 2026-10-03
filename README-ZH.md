@@ -7,6 +7,8 @@ Laya Model Advisor 与 Alpha Squad 仍作为独立 Skill 安装，Alpha Squad �
 
 [English](README.md) | [简体中文](README-ZH.md)
 
+工作台 V1 已进入源码预览：[构建、使用与验证状态](docs/workbench-implementation-status.md)。预编译版本尚未发布；安装当前源码需要提供 `--workbench-binary`。
+
 > 一条命令，把本地 Laya 决策能力接入你的编码 Agent。
 
 Oh My Laya 基于 [laya-mlx](https://github.com/mizorewww/laya-mlx)，自动下载并校验 Hugging Face 权重，随后注册 `laya_tell_me` 工具。它适合做分类、评分、风险分流和是非判断；模型下载完成后，推理完全在本机运行。
