@@ -8,6 +8,21 @@ use tokio::{io::{AsyncBufReadExt, AsyncWriteExt, BufReader}, net::UnixStream};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ServiceInfo { pub pid: u32, pub instance: String, pub port: u16, pub protocol_version: u32 }
 
+pub const DEFAULT_PORT: u16 = 18686;
+
+pub fn configured_port() -> Result<u16> {
+    match std::env::var("LAYA_PORT") {
+        Ok(value)=>parse_port(&value),
+        Err(std::env::VarError::NotPresent)=>Ok(DEFAULT_PORT),
+        Err(error)=>Err(error).context("LAYA_PORT must be a valid port"),
+    }
+}
+
+pub fn parse_port(value:&str)->Result<u16> {
+    if value.is_empty() || !value.bytes().all(|c|c.is_ascii_digit()) {bail!("port must be an integer from 0 to 65535");}
+    value.parse().context("port must be an integer from 0 to 65535")
+}
+
 /// The model-bearing child keeps the same flock open description after exec.
 /// Parent SIGKILL must not release exclusivity while that child still exists.
 pub fn inherit_model_lock(command:&mut std::process::Command,lock:&std::fs::File) {
@@ -122,16 +137,30 @@ mod tests {
 }
 
 pub async fn ensure(root: &Path) -> Result<()> {
+    ensure_port(root,None).await
+}
+
+pub async fn ensure_port(root:&Path,requested:Option<u16>)->Result<()> {
     let ping = Request::new("status", Value::Null);
-    if rpc(root, &ping).await.is_ok() { return Ok(()); }
+    let port=match requested {Some(port)=>port,None=>configured_port()?};
+    let verify=|status:&Value|->Result<()> {
+        if requested.is_some() && port!=0 && status["service"]["port"].as_u64()!=Some(port as u64) {
+            bail!("service already running on port {}; finish active tasks, run laya stop, then laya dashboard --port {port}",status["service"]["port"]);
+        }
+        Ok(())
+    };
+    if let Ok(status)=rpc(root, &ping).await { verify(&status)?; return Ok(()); }
     private_dir(root)?;
     let log = std::fs::OpenOptions::new().create(true).append(true).open(root.join("service.log"))?;
     std::fs::set_permissions(root.join("service.log"), std::fs::Permissions::from_mode(0o600))?;
-    std::process::Command::new(std::env::current_exe()?).arg("service")
+    let mut child=std::process::Command::new(std::env::current_exe()?).args(["service","--port",&port.to_string()])
         .env("LAYA_WORKBENCH_DIR",root).stdin(Stdio::null()).stdout(Stdio::null()).stderr(log)
         .spawn().context("launch local service")?;
     for _ in 0..100 {
-        if rpc(root,&ping).await.is_ok() { return Ok(()); }
+        if let Ok(status)=rpc(root,&ping).await { verify(&status)?; return Ok(()); }
+        if let Some(status)=child.try_wait()? {
+            if !status.success() {bail!("service failed to start on 127.0.0.1:{port}; the port may be occupied. Try laya dashboard --port <free-port>; inspect {}",root.join("service.log").display());}
+        }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     bail!("service failed to start; inspect {}",root.join("service.log").display())

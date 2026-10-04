@@ -140,7 +140,7 @@ class DiskExhaustionTests(unittest.TestCase):
                 request = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
                            'params': {'name': 'laya_feedback', 'arguments': pressure_event}}
                 response = subprocess.run([str(BINARY), 'mcp'], input=json.dumps(request) + '\n',
-                    env={**os.environ, 'LAYA_WORKBENCH_DIR': str(root),
+                    env={**os.environ, 'LAYA_WORKBENCH_DIR': str(root), 'LAYA_PORT': '0',
                          'LAYA_PYTHON': str(ROOT / 'tests/fixtures/workbench_worker.py')},
                     text=True, capture_output=True, timeout=20, check=True)
                 tool = json.loads(response.stdout)['result']

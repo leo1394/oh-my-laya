@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { createConnection } from 'node:net'
 import { resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -13,13 +13,15 @@ assert.ok(process.env.LAYA_PLAYWRIGHT_MODULE, 'Set LAYA_PLAYWRIGHT_MODULE to an 
 assert.ok(process.env.LAYA_CHROME_BIN, 'Set LAYA_CHROME_BIN to an existing Chrome executable')
 const { chromium } = await import(pathToFileURL(resolve(process.env.LAYA_PLAYWRIGHT_MODULE)).href)
 const root = fileURLToPath(new URL('../', import.meta.url))
-const binary = resolve(root, 'target/release/laya')
+const binary = resolve(process.env.LAYA_TEST_BINARY || resolve(root, 'target/release/laya'))
+assert.ok(existsSync(binary) && statSync(binary).isFile(), `LAYA_TEST_BINARY must name an existing regular file: ${binary}`)
 const binarySha256 = createHash('sha256').update(readFileSync(binary)).digest('hex')
 const populate = process.argv.includes('--populate')
 const populatedRows = 75
+const browserLocale = 'en-US'
 // Keep Unix socket paths below macOS sockaddr_un's path length limit.
 const directory = mkdtempSync('/private/tmp/laya-browser-resource-')
-const env = { ...process.env, LAYA_WORKBENCH_DIR: directory,
+const env = { ...process.env, LAYA_WORKBENCH_DIR: directory, LAYA_PORT: '0',
   LAYA_PYTHON: resolve(root, 'tests/fixtures/workbench_worker.py'), LAYA_IDLE_SECONDS: '1' }
 const service = spawn(binary, ['service'], { env, stdio: 'ignore' })
 let serviceError
@@ -76,6 +78,15 @@ function requireBrowserSamples(rows) {
   }
 }
 
+async function waitForPressed(button, pressed) {
+  const expected = String(pressed)
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if (await button.getAttribute('aria-pressed') === expected) return
+    await delay(50)
+  }
+  assert.equal(await button.getAttribute('aria-pressed'), expected)
+}
+
 try {
   let ready = false
   for (let attempt = 0; attempt < 100; attempt++) {
@@ -87,7 +98,7 @@ try {
   assert.ok(ready, 'Service did not become ready')
   browser = await chromium.launch({ executablePath: process.env.LAYA_CHROME_BIN, headless: true })
   const session = await browser.newBrowserCDPSession()
-  const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } })
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, locale: browserLocale })
   const errors = []
   page.on('pageerror', (error) => errors.push(error.message))
   page.on('response', (response) => {
@@ -104,17 +115,17 @@ try {
   const url = command(['dashboard', '--no-open']).trim()
   const response = await page.goto(url)
   assert.equal(response.status(), 200)
-  await page.getByRole('button', { name: /Settings & status/ }).click()
-  await page.locator('.settings-page').waitFor()
+  const navigation = page.getByRole('navigation')
+  await navigation.getByRole('button', { name: /Settings|设置/ }).click()
+  await page.getByRole('heading', { name: /Collection & learning|采集与学习/ }).waitFor()
   await page.waitForFunction(() => !location.hash.includes('pair='))
   let queuePages = null
   let queueResponseBytes = null
   if (populate) {
-    const recording = page.getByRole('button', { name: /Decision recording/ })
+    const recording = page.getByRole('button', { name: /Collect decisions|采集新决策/ })
     page.once('dialog', (dialog) => dialog.accept())
     await recording.click()
-    await page.waitForFunction(() => [...document.querySelectorAll('button')].some((button) =>
-      button.textContent.includes('Decision recording') && button.getAttribute('aria-pressed') === 'true'))
+    await waitForPressed(recording, true)
     const stateSuffix = 'x'.repeat(4096)
     for (let row = 0; row < populatedRows; row++) {
       const result = await rpc('predict', {
@@ -127,24 +138,28 @@ try {
     assert.equal(status().worker.pid, 0, 'Fixture worker did not exit before browser measurement')
     const firstResponsePromise = page.waitForResponse((response) =>
       response.url().includes('/api/v1/decisions?') && response.url().includes('offset=0'))
-    await page.getByRole('button', { name: /Review queue/ }).click()
+    await navigation.getByRole('button', { name: /Overview|概览/ }).click()
     const firstResponse = await firstResponsePromise
     await page.locator('.decision-list').waitFor()
-    await page.getByText('Page 1 · 50 decisions').waitFor()
+    const pagination = page.locator('.queue-pagination')
+    await pagination.locator('span').filter({ hasText: /^1$/ }).waitFor()
     const firstPageIds = await page.locator('.decision-row').evaluateAll((rows) => rows.map((row) => row.textContent))
     assert.equal(firstPageIds.length, 50)
     const secondResponsePromise = page.waitForResponse((response) =>
       response.url().includes('/api/v1/decisions?') && response.url().includes('offset=50'))
-    await page.getByRole('button', { name: 'Next' }).click()
+    await page.getByRole('button', { name: /^(Next|下一页)$/ }).click()
     const secondResponse = await secondResponsePromise
-    await page.getByText('Page 2 · 25 decisions').waitFor()
+    await pagination.locator('span').filter({ hasText: /^2$/ }).waitFor()
     const secondPageIds = await page.locator('.decision-row').evaluateAll((rows) => rows.map((row) => row.textContent))
     assert.equal(secondPageIds.length, 25)
     assert.equal(new Set([...firstPageIds, ...secondPageIds]).size, populatedRows)
     queuePages = [firstPageIds.length, secondPageIds.length]
     queueResponseBytes = [(await firstResponse.body()).byteLength, (await secondResponse.body()).byteLength]
-    await page.getByRole('button', { name: 'Previous' }).click()
-    await page.getByText('Page 1 · 50 decisions').waitFor()
+    await page.getByRole('button', { name: /^(Previous|上一页)$/ }).click()
+    await pagination.locator('span').filter({ hasText: /^1$/ }).waitFor()
+  } else {
+    await navigation.getByRole('button', { name: /Overview|概览/ }).click()
+    await page.getByRole('heading', { name: /Cases to review|需要关注的案例/ }).waitFor()
   }
   const peaks = new Map()
   const started = performance.now()
@@ -171,7 +186,7 @@ try {
   }
   const serviceRss = rss(service.pid)
   assert.ok(Number.isFinite(serviceRss) && serviceRss > 0, 'Service RSS unavailable')
-  report = { browser: browser.version(), binary_sha256: binarySha256, headless: true,
+  report = { browser: browser.version(), browser_locale: browserLocale, binary_sha256: binarySha256, headless: true,
     dataset: populate ? `${populatedRows} fixture decisions in disposable database` : 'empty disposable database',
     state_characters_per_decision: populate ? `Populated browser resource fixture decision NNN `.length + 4096 : 0,
     dataset_counts: finalStatus.counts, database_bytes: finalStatus.database_bytes,
@@ -185,13 +200,12 @@ try {
     ui_errors: errors,
     scope: 'macOS ps per-process RSS for CDP-reported processes (may exclude crash helpers); separate isolated Chrome; no summed unique or GPU memory; browser RAM is an optimization observation, not a hard threshold' }
   if (populate) {
-    await page.getByRole('button', { name: /Settings & status/ }).click()
-    await page.locator('.settings-page').waitFor()
-    const recording = page.getByRole('button', { name: /Decision recording/ })
+    await navigation.getByRole('button', { name: /Settings|设置/ }).click()
+    await page.getByRole('heading', { name: /Collection & learning|采集与学习/ }).waitFor()
+    const recording = page.getByRole('button', { name: /Collect decisions|采集新决策/ })
     page.once('dialog', (dialog) => dialog.accept())
     await recording.click()
-    await page.waitForFunction(() => [...document.querySelectorAll('button')].some((button) =>
-      button.textContent.includes('Decision recording') && button.getAttribute('aria-pressed') === 'false'))
+    await waitForPressed(recording, false)
     assert.equal(status().settings.recording_enabled, false)
   }
   assert.deepEqual(errors, [])

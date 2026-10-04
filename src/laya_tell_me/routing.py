@@ -22,7 +22,11 @@ def build_role_advice(result, models, current_model, current_effort, role, setti
                       execution_choice=None):
     if role not in ROLES:
         raise ValueError(f"role must be one of {ROLES}; orchestrator is never routed")
-    advice = build_advice(result, models, current_model, settings)
+    routing_settings = dict(settings)
+    if role == "reviewer" or settings["policy"] != "auto":
+        # These roles use an explicitly selected pair, not the automatic tier pool.
+        routing_settings.pop("model_tiers", None)
+    advice = build_advice(result, models, current_model, routing_settings)
     parent = {"model": current_model, "reasoning_effort": current_effort}
     try:
         squad = validate_squad(settings.get("squad"))

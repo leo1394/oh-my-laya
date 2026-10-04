@@ -6,7 +6,7 @@ import { createSSRApp } from 'vue'
 import { renderToString } from '@vue/server-renderer'
 
 test('review signal component renders triage and escapes feedback evidence', async () => {
-  const server = await createServer({ root: fileURLToPath(new URL('..', import.meta.url)), server: { middlewareMode: true }, appType: 'custom' })
+  const server = await createServer({ root: fileURLToPath(new URL('..', import.meta.url)), server: { middlewareMode: true, hmr: false, ws: false }, appType: 'custom' })
   try {
     const { default: component } = await server.ssrLoadModule('/src/ReviewSignals.vue')
     const html = await renderToString(createSSRApp(component, {

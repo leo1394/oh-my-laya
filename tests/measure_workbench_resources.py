@@ -1,5 +1,6 @@
 """Opt-in 60-second release idle measurement; no model is loaded."""
 import json
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -22,9 +23,10 @@ def sample(pid):
 
 
 def main():
-    binary = ROOT / "target/release/laya"
+    binary = Path(os.environ.get("LAYA_TEST_BINARY", str(ROOT / "target/release/laya"))).resolve(strict=True)
+    binary_sha256 = hashlib.sha256(binary.read_bytes()).hexdigest()
     with tempfile.TemporaryDirectory(prefix="laya-resource-", dir="/private/tmp") as directory:
-        env = {**os.environ, "LAYA_WORKBENCH_DIR": directory}
+        env = {**os.environ, "LAYA_WORKBENCH_DIR": directory, "LAYA_PORT": "0"}
         service = subprocess.Popen([str(binary), "service"], env=env)
         bridges = []
         try:
@@ -48,7 +50,8 @@ def main():
                 peak = max(peak, sample(service.pid)["rss_kib"])
             final = sample(service.pid)
             duration = time.monotonic() - started
-            print(json.dumps({"duration_seconds": round(duration, 2), "service_peak_rss_kib": peak,
+            print(json.dumps({"binary": str(binary), "binary_sha256": binary_sha256,
+                              "duration_seconds": round(duration, 2), "service_peak_rss_kib": peak,
                               "service_single_core_cpu_percent": round(100 * (final["cpu_seconds"] - start["cpu_seconds"]) / duration, 4),
                               "mcp_bridges": [sample(bridge.pid) for bridge in bridges],
                               "scope": "macOS ps RSS, separate processes; no Python model or browser; not summed unified memory"}))

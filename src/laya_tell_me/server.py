@@ -97,6 +97,7 @@ def run_prediction(
     advisor: dict[str, Any] | None = None,
     *,
     memory_cases: list[dict[str, Any]] | None = None,
+    model_tiers: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run prediction logic shared by MCP and the private worker protocol."""
     if advisor is not None:
@@ -136,6 +137,7 @@ def run_prediction(
         raise PredictionFailure(error) from error
     if advisor is not None:
         settings = preferences()
+        settings["model_tiers"] = model_tiers or {}
         if "role" in advisor:
             advice = build_role_advice(
                 result, advisor.get("models", []), advisor.get("current_model"),

@@ -15,14 +15,17 @@ import urllib.request
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = ROOT / "target/debug/laya"
+TARGET_DIR = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
+if not TARGET_DIR.is_absolute():
+    TARGET_DIR = ROOT / TARGET_DIR
+BINARY = TARGET_DIR / "debug/laya"
 
 
 class Service:
     def __init__(self, root):
         self.root = root
         self.process = subprocess.Popen([str(BINARY), "service"], env={**os.environ,
-            "LAYA_WORKBENCH_DIR": str(root), "LAYA_PYTHON": str(ROOT / "tests/fixtures/workbench_worker.py")},
+            "LAYA_WORKBENCH_DIR": str(root), "LAYA_PORT": "0", "LAYA_PYTHON": str(ROOT / "tests/fixtures/workbench_worker.py")},
             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         for _ in range(250):
             if (root / "service.json").exists():
@@ -78,6 +81,43 @@ class Service:
 
 @unittest.skipUnless(BINARY.exists(), "Build the Rust service first")
 class ServiceFailureTests(unittest.TestCase):
+    def test_advisor_routing_scope_controls_memory_and_is_stripped_before_worker(self):
+        with tempfile.TemporaryDirectory(dir="/private/tmp", prefix="laya-routing-") as directory:
+            root = Path(directory)
+            service = Service(root)
+            service.close()
+            report = {"passed": True, "candidate_memory_exposure": 1,
+                      "evaluator_identity": "laya-advisor-evaluator-v3",
+                      "retrieval_policy_version": "routing-family-lineage-v1",
+                      "fixture_only": "deterministic subprocess; not real MLX approval"}
+            with sqlite3.connect(root / "laya.sqlite3") as db:
+                db.execute("UPDATE settings SET value_json=json_set(value_json,'$.memory_enabled',json('true')),active_memory_version='routing-fixture' WHERE singleton=1")
+                db.execute("INSERT INTO decisions(id,request_id,request_json,recording_status,created_at) VALUES('reviewed-doc','reviewed-doc','{\"state\":\"README spelling guidance\"}','stored',1)")
+                db.execute("INSERT INTO reviews(decision_id,revision,status,labels_json,reason,actor_json,created_at) VALUES('reviewed-doc',1,'confirmed','{\"complexity\":\"low\",\"risk\":\"low\",\"certainty\":\"clear\"}','fixture','null',1)")
+                db.execute("INSERT INTO cases(id,decision_id,review_revision,content_json,labels_json,task_family,task_lineage,language,applicability,content_hash,created_at,verification_status) VALUES('expected-case','reviewed-doc',1,'\"README spelling guidance\"','{\"complexity\":\"low\",\"risk\":\"low\",\"certainty\":\"clear\"}','documentation','reviewed-readme','en','task-fact','fixture-hash',1,'verified')")
+                db.execute("INSERT INTO cases_fts(case_id,content) VALUES('expected-case','readme spelling guidance')")
+                db.execute("INSERT INTO memory_versions(id,status,configuration_json,evaluation_json,evaluation_status,created_at,activated_at) VALUES('routing-fixture','active','{}',?,'passed',1,1)", (json.dumps(report),))
+                db.execute("INSERT INTO memory_version_cases(version_id,case_id,case_hash) VALUES('routing-fixture','expected-case','fixture-hash')")
+            service = Service(root)
+            try:
+                matching = service.rpc("predict", {"state": "Update README spelling guidance", "advisor": {
+                    "models": [], "task_family": "docs", "task_lineage": "new-readme"}}, "routing-match")
+                self.assertEqual(matching["meta"]["case_ids"], ["expected-case"])
+                self.assertEqual(matching["meta"]["worker_case_ids"], ["expected-case"])
+                self.assertFalse(matching["meta"]["routing_metadata_present"])
+                same_lineage = service.rpc("predict", {"state": "Update README spelling guidance", "advisor": {
+                    "models": [], "task_family": "documentation", "task_lineage": "reviewed-readme"}}, "routing-lineage")
+                self.assertEqual(same_lineage["meta"]["case_ids"], [])
+                self.assertEqual(same_lineage["meta"]["worker_case_ids"], [])
+                self.assertFalse(same_lineage["meta"]["routing_metadata_present"])
+                cross_family = service.rpc("predict", {"state": "Update README spelling guidance", "advisor": {
+                    "models": [], "task_family": "authorization", "task_lineage": "new-auth"}}, "routing-family")
+                self.assertEqual(cross_family["meta"]["case_ids"], [])
+                self.assertEqual(cross_family["meta"]["worker_case_ids"], [])
+                self.assertFalse(cross_family["meta"]["routing_metadata_present"])
+            finally:
+                service.close()
+
     def test_both_databases_reject_writes_across_restart_then_recover(self):
         with tempfile.TemporaryDirectory(dir="/private/tmp", prefix="laya-fault-") as directory:
             root = Path(directory)

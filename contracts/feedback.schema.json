@@ -10,7 +10,7 @@
     "event_id": {"type": "string", "minLength": 1, "maxLength": 128},
     "decision_id": {"type": "string", "minLength": 1, "maxLength": 128},
     "attempt_ref": {"type": "string", "minLength": 1, "maxLength": 128},
-    "kind": {"enum": ["assignment", "test", "review", "outcome", "user_choice", "usage"]},
+    "kind": {"enum": ["assignment", "test", "review", "outcome", "user_choice", "usage", "run_manifest"]},
     "source": {"$ref": "#/$defs/source"},
     "payload": {"type": "object"}
   },
@@ -41,6 +41,10 @@
     {
       "if": {"properties": {"kind": {"const": "usage"}}},
       "then": {"properties": {"payload": {"$ref": "#/$defs/usagePayload"}}}
+    },
+    {
+      "if": {"properties": {"kind": {"const": "run_manifest"}}},
+      "then": {"properties": {"payload": {"$ref": "#/$defs/runManifestPayload"}}}
     }
   ],
   "$defs": {
@@ -178,6 +182,85 @@
         "scores": {"$ref": "#/$defs/common/scores"}, "reason": {"$ref": "#/$defs/common/reason"}, "evidence_refs": {"$ref": "#/$defs/common/evidence_refs"}
       }
     },
+    "runManifestNullableIdentity": {"type": ["string", "null"], "minLength": 1, "maxLength": 512},
+    "runManifestPayload": {
+      "type": "object", "additionalProperties": false,
+      "required": ["manifest_version", "run_id", "host_root_ref", "mode", "observed_at", "terminal_checkpoint", "context", "meter", "segments", "outcome_event_ids", "coverage"],
+      "properties": {
+        "manifest_version": {"const": 1},
+        "run_id": {"type": "string", "minLength": 1, "maxLength": 512},
+        "host_root_ref": {"type": "string", "minLength": 1, "maxLength": 512},
+        "mode": {"enum": ["baseline", "laya"]},
+        "observed_at": {"type": "string", "format": "date-time", "minLength": 1, "maxLength": 512},
+        "terminal_checkpoint": {"type": "string", "minLength": 1, "maxLength": 512},
+        "context": {
+          "type": "object", "additionalProperties": false,
+          "required": ["task_snapshot_hash", "code_revision", "test_snapshot_hash", "tool_environment_id", "external_inputs_hash", "acceptance_policy"],
+          "properties": {
+            "task_snapshot_hash": {"$ref": "#/$defs/runManifestNullableIdentity"},
+            "code_revision": {"$ref": "#/$defs/runManifestNullableIdentity"},
+            "test_snapshot_hash": {"$ref": "#/$defs/runManifestNullableIdentity"},
+            "tool_environment_id": {"$ref": "#/$defs/runManifestNullableIdentity"},
+            "external_inputs_hash": {"$ref": "#/$defs/runManifestNullableIdentity"},
+            "acceptance_policy": {"$ref": "#/$defs/runManifestNullableIdentity"}
+          }
+        },
+        "meter": {
+          "type": "object", "additionalProperties": false,
+          "required": ["unit", "identity", "scope", "excluded_components"],
+          "properties": {
+            "unit": {"const": "tokens"},
+            "identity": {"$ref": "#/$defs/runManifestNullableIdentity"},
+            "scope": {"const": "host_only"},
+            "excluded_components": {"const": ["local_laya_inference"]}
+          }
+        },
+        "segments": {
+          "type": "array", "minItems": 1, "maxItems": 128,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["decision_id", "attempt_ref", "usage_event_id"],
+            "properties": {
+              "decision_id": {"type": "string", "minLength": 1, "maxLength": 512},
+              "attempt_ref": {"type": "string", "minLength": 1, "maxLength": 512},
+              "usage_event_id": {"type": "string", "minLength": 1, "maxLength": 512}
+            }
+          }
+        },
+        "outcome_event_ids": {"type": "array", "maxItems": 128, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 512}},
+        "coverage": {
+          "type": "object", "additionalProperties": false,
+          "required": ["status", "evidence_refs"],
+          "properties": {
+            "status": {"enum": ["complete", "partial", "unknown"]},
+            "evidence_refs": {"type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 512}}
+          }
+        },
+        "scenario": {"$ref": "#/$defs/runScenario"}
+      }
+    },
+    "runScenario": {
+      "type": "object", "additionalProperties": false,
+      "required": ["orchestrator_model", "reasoning_effort", "initial_context_tokens", "stages", "input_source"],
+      "properties": {
+        "orchestrator_model": {"type": "string", "minLength": 1, "maxLength": 256},
+        "reasoning_effort": {"type": ["string", "null"], "minLength": 1, "maxLength": 64},
+        "initial_context_tokens": {"type": "integer", "minimum": 0, "maximum": 1000000000},
+        "stages": {
+          "type": "array", "minItems": 1, "maxItems": 128,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["context_growth_tokens", "work_output_tokens", "passes"],
+            "properties": {
+              "context_growth_tokens": {"type": "integer", "minimum": 0, "maximum": 1000000000},
+              "work_output_tokens": {"type": "integer", "minimum": 0, "maximum": 1000000000},
+              "passes": {"type": "integer", "minimum": 1, "maximum": 100}
+            }
+          }
+        },
+        "input_source": {"type": "string", "minLength": 1, "maxLength": 512}
+      }
+    },
     "usagePayload": {
       "type": "object", "additionalProperties": false,
       "properties": {
@@ -185,7 +268,13 @@
         "source": {"type": "string", "minLength": 1, "maxLength": 1024}, "source_verified": {"type": "boolean"},
         "scope": {"enum": ["response", "turn", "attempt", "task", "subtree"]}, "checkpoint": {"type": ["string", "null"], "minLength": 1, "maxLength": 512},
         "parent_scope": {"type": ["string", "null"], "minLength": 1, "maxLength": 512}, "overlap_status": {"enum": ["non_overlapping", "overlapping", "unknown"]},
+        "aggregation": {"const": "cumulative"}, "usage_stream_id": {"type": "string", "minLength": 1, "maxLength": 128}, "source_sequence": {"type": "integer", "minimum": 1},
         "scores": {"$ref": "#/$defs/common/scores"}, "reason": {"$ref": "#/$defs/common/reason"}, "evidence_refs": {"$ref": "#/$defs/common/evidence_refs"}
+      },
+      "dependentRequired": {
+        "aggregation": ["usage_stream_id", "source_sequence"],
+        "usage_stream_id": ["aggregation", "source_sequence"],
+        "source_sequence": ["aggregation", "usage_stream_id"]
       },
       "allOf": [{
         "if": {"anyOf": [
@@ -194,6 +283,9 @@
           {"required": ["output_tokens"], "properties": {"output_tokens": {"type": "integer"}}}
         ]},
         "then": {"required": ["source", "source_verified", "scope", "checkpoint", "overlap_status"], "properties": {"source_verified": {"const": true}}}
+      }, {
+        "if": {"required": ["usage_stream_id"]},
+        "then": {"required": ["total_tokens", "source", "source_verified", "scope", "checkpoint", "overlap_status"], "properties": {"scope": {"const": "attempt"}}}
       }]
     }
   }

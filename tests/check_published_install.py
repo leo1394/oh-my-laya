@@ -128,6 +128,7 @@ def isolated_environment(root, python, codex):
         "USER": os.environ.get("USER", "tester"),
         "XDG_CACHE_HOME": str(root / "xdg-cache"),
         "HF_HOME": str(root / "huggingface"),
+        "LAYA_PORT": "0",
     }
     for name in FORBIDDEN:
         if shutil.which(name, path=environment["PATH"]) is not None:

@@ -171,9 +171,18 @@ def build_advice(result, models, current_model, settings):
         else "balanced"
     )
     # Only use explicit host/user tier mappings. Model names are not rankings.
+    tier_key = {"fast": "low", "balanced": "medium", "strong": "high"}[tier]
+    profile = settings.get("model_tiers", {}).get(tier_key)
+    profile_valid = False
+    profile_blocked = False
     selected = next((model for model in models if model.get("tier") == tier), None)
     if selected is None:
         selected = next((model for model in models if model["id"] == current_model), None)
+    if profile is not None:
+        selected = next((model for model in models if isinstance(profile, dict)
+                         and model["id"] == profile.get("model")
+                         and profile.get("reasoning_effort") in model["reasoning_efforts"]), None)
+        profile_valid = selected is not None
     ceiling = settings.get("ceiling") if settings["policy"] == "auto" else None
     ceiling_valid = False
     if settings["policy"] == "auto":
@@ -186,10 +195,18 @@ def build_advice(result, models, current_model, settings):
                 selected = dict(candidate)
                 index = candidate["reasoning_efforts"].index(ceiling["reasoning_effort"])
                 selected["reasoning_efforts"] = candidate["reasoning_efforts"][:index + 1]
+        if profile is not None:
+            profile_blocked = (not profile_valid or selected is None
+                               or profile["model"] != selected["id"]
+                               or profile["reasoning_effort"] not in selected["reasoning_efforts"])
+            if profile_blocked:
+                selected = None
     recommendation = None
     if selected is not None:
         efforts = selected["reasoning_efforts"]
         preferred = {"fast": "low", "balanced": "medium", "strong": "high"}[tier]
+        if profile_valid:
+            preferred = profile["reasoning_effort"]
         # The host supplies effort order from least to most reasoning.
         effort = preferred if preferred in efforts else efforts[
             {"fast": 0, "balanced": len(efforts) // 2, "strong": len(efforts) - 1}[tier]
@@ -197,13 +214,15 @@ def build_advice(result, models, current_model, settings):
         recommendation = {"model": selected["id"], "reasoning_effort": effort}
     policy = settings["policy"]
     needs_selection = settings["needs_policy_selection"] or (policy == "auto" and not ceiling_valid)
-    ask = (needs_selection or policy == "always"
+    ask = (needs_selection or profile_blocked or (profile is not None and not profile_valid) or policy == "always"
            or (policy == "conditional" and (high or uncertain)))
     return {
         "assessment": assessment,
         "uncertain": uncertain,
         "confidence_threshold": CONFIDENCE_THRESHOLD,
         "recommended_tier": tier,
+        "configured_tier": tier_key if profile is not None else None,
+        "tier_profile_blocked": profile_blocked or (profile is not None and not profile_valid),
         "recommendation": recommendation,
         "models": models,
         "policy": policy,

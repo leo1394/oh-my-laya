@@ -4,14 +4,17 @@ use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use std::{collections::{HashSet, VecDeque}, fs, io::Read, path::{Path, PathBuf}, sync::mpsc, thread, time::Duration};
+use std::{collections::{HashMap, HashSet, VecDeque}, fs, io::Read, path::{Path, PathBuf}, sync::mpsc, thread, time::Duration};
 use tokio::sync::oneshot;
 
 const MIGRATION_1: &str = include_str!("../../../migrations/0001_workbench.sql");
 const MIGRATION_2: &str = include_str!("../../../migrations/0002_evidence.sql");
 const MIGRATION_3: &str = include_str!("../../../migrations/0003_case_applicability.sql");
+const MIGRATION_4: &str = include_str!("../../../migrations/0004_case_lineage.sql");
 const MAX_FEEDBACK_BYTES: usize = 16 * 1024;
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
+pub const EVALUATOR_IDENTITY: &str = "laya-advisor-evaluator-v3";
+pub const RETRIEVAL_POLICY_VERSION: &str = "routing-family-lineage-v1";
 const MAX_UNRECORDED_IDS: usize = 4096;
 
 type Reply = oneshot::Sender<Result<Value>>;
@@ -135,6 +138,7 @@ impl Database {
             "backup/delete" => self.backup_delete(value),
             "backup/restore" => self.backup_restore(value),
             "retention" => self.retention(value),
+            "overview/get" => self.overview(value),
             "status" => self.status(),
             _ => bail!("not_found: unknown store method {method}"),
         };
@@ -171,7 +175,17 @@ impl Database {
 
     fn settings_update(&mut self, value: Value) -> Result<Value> {
         let updates = object(&value, "settings update")?;
-        allowed(updates, &["recording_enabled", "memory_enabled", "replay_enabled", "retention_days", "storage_soft_limit_bytes"])?;
+        allowed(updates, &["recording_enabled", "memory_enabled", "replay_enabled", "retention_days", "storage_soft_limit_bytes", "model_tiers"])?;
+        if let Some(v) = updates.get("model_tiers") {
+            let tiers = object(v,"model tiers")?;
+            allowed(tiers,&["low","medium","high"])?;
+            for pair in tiers.values() {
+                let pair = object(pair,"tier configuration")?;
+                allowed(pair,&["model","reasoning_effort"])?;
+                required_string(pair,"model",128)?;
+                required_string(pair,"reasoning_effort",32)?;
+            }
+        }
         if let Some(v) = updates.get("recording_enabled") { require_bool(v, "recording_enabled")?; }
         if let Some(v) = updates.get("memory_enabled") { require_bool(v, "memory_enabled")?; }
         if let Some(v) = updates.get("replay_enabled") { require_bool(v, "replay_enabled")?; }
@@ -298,7 +312,7 @@ impl Database {
             "SELECT id,request_id,request_json,result_json,error_json,context_json,recording_status,protected,created_at,finished_at FROM decisions WHERE id=?1 AND deleted_at IS NULL", [id], decision_row).optional()?
             .ok_or_else(|| anyhow!("not_found: decision {id}"))?;
         let feedback = json_column(&self.connection, "SELECT json_object('event_id',event_id,'kind',kind,'attempt_ref',attempt_ref,'source',json(source_json),'payload',json(payload_json),'payload_hash',event_hash,'receive_sequence',receive_sequence,'received_at',received_at) FROM feedback_events WHERE decision_id=?1 ORDER BY receive_sequence", id)?;
-        let reviews = json_column(&self.connection, "SELECT json_object('revision',r.revision,'status',r.status,'labels',json(r.labels_json),'reason',r.reason,'actor',json(r.actor_json),'created_at',r.created_at,'task_family',c.task_family,'language',c.language,'applicability',c.applicability,'applicability_reason',c.applicability_reason,'validation_assignment_event_id',c.validation_assignment_event_id,'validation_context',json(c.validation_context_json),'verification_status',c.verification_status,'last_validated_at',c.last_validated_at) FROM reviews r LEFT JOIN cases c ON c.decision_id=r.decision_id AND c.review_revision=r.revision WHERE r.decision_id=?1 ORDER BY r.revision", id)?;
+        let reviews = json_column(&self.connection, "SELECT json_object('revision',r.revision,'status',r.status,'labels',json(r.labels_json),'reason',r.reason,'actor',json(r.actor_json),'created_at',r.created_at,'task_family',c.task_family,'task_lineage',c.task_lineage,'language',c.language,'applicability',c.applicability,'applicability_reason',c.applicability_reason,'validation_assignment_event_id',c.validation_assignment_event_id,'validation_context',json(c.validation_context_json),'verification_status',c.verification_status,'last_validated_at',c.last_validated_at) FROM reviews r LEFT JOIN cases c ON c.decision_id=r.decision_id AND c.review_revision=r.revision WHERE r.decision_id=?1 ORDER BY r.revision", id)?;
         let mut snapshots = json_column(&self.connection, "SELECT json_object('id',id,'request_id',request_id,'attempt_ref',attempt_ref,'kind',kind,'payload',json(payload_json),'artifact_id',artifact_id,'payload_hash',payload_hash,'capture_status',capture_status,'redaction_version',redaction_version,'uncertainty_reasons',json(uncertainty_reasons_json),'protected',json(protected),'created_at',created_at) FROM decision_snapshots WHERE decision_id=?1 ORDER BY id", id)?;
         for snapshot in &mut snapshots {
             if let Some(artifact_id)=snapshot["artifact_id"].as_str() {
@@ -355,6 +369,7 @@ impl Database {
             Some((true,_)) => bail!("not_found: decision {decision_id} was deleted"),
             _ => {}
         }
+        if map["kind"] == "run_manifest" { validate_run_manifest_references(&self.connection,map)?; }
         let payload = map.get("payload").unwrap();
         let source = map.get("source").unwrap();
         let attempt_ref = map.get("attempt_ref").and_then(Value::as_str);
@@ -392,7 +407,7 @@ impl Database {
 
     fn reviews_create(&mut self, value: Value) -> Result<Value> {
         let map = object(&value, "review")?;
-        allowed(map, &["id", "expected_revision", "status", "labels", "reason", "actor", "task_family", "language", "applicability", "applicability_reason", "validation_assignment_event_id"])?;
+        allowed(map, &["id", "expected_revision", "status", "labels", "reason", "actor", "task_family", "task_lineage", "language", "applicability", "applicability_reason", "validation_assignment_event_id"])?;
         let id = required_string(map, "id", 128)?;
         let expected = map.get("expected_revision").map(|v| require_i64(v, "expected_revision")).transpose()?.unwrap_or(0);
         let status = required_string(map, "status", 32)?;
@@ -400,7 +415,10 @@ impl Database {
         let labels = map.get("labels").cloned().unwrap_or_else(|| json!({}));
         if ["confirmed", "corrected"].contains(&status) {
             let labels_map = object(&labels, "review labels")?;
-            allowed(labels_map,&["complexity","risk","certainty"])?;
+            allowed(labels_map,&["complexity","risk","certainty","model_tier"])?;
+            if let Some(tier)=labels_map.get("model_tier") {
+                if !["low","medium","high"].contains(&tier.as_str().unwrap_or("")) {bail!("invalid: human model tier");}
+            }
             for key in ["complexity", "risk", "certainty"] {
                 if !labels_map.contains_key(key) { bail!("invalid: completed review requires {key} label"); }
             }
@@ -432,7 +450,8 @@ impl Database {
             let summary = state.as_str().map(str::to_string).unwrap_or_else(||state.to_string());
             if summary.is_empty() { bail!("invalid: completed review requires a non-empty request.state summary"); }
             let content = Value::String(summary.chars().take(4096).collect());
-            let task_family = optional_string(map,"task_family",128)?.unwrap_or("general");
+            let task_family = canonical_task_family(optional_string(map,"task_family",64)?.unwrap_or("general"))?;
+            let task_lineage = optional_string(map,"task_lineage",128)?.map(validate_task_lineage).transpose()?;
             let inferred_language = if contains_cjk(&summary){"zh"}else{"en"};
             let language = optional_string(map,"language",32)?.unwrap_or(inferred_language);
             let applicability = optional_string(map,"applicability",64)?.unwrap_or("task-fact");
@@ -446,8 +465,8 @@ impl Database {
                 derive_case_validation(&transaction,id,validation_assignment_event_id,requested_reason)?
             };
             let cid = format!("{id}:{revision}");
-            transaction.execute("INSERT INTO cases(id,decision_id,review_revision,content_json,labels_json,task_family,language,applicability,applicability_reason,content_hash,created_at,validation_assignment_event_id,validation_context_json,verification_status,last_validated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)", params![
-                cid, id, revision, content.to_string(), labels.to_string(), task_family, language, applicability, applicability_reason, hash(&content), now(), validation_assignment_event_id, validation_context.map(|value|value.to_string()), verification_status, last_validated_at
+            transaction.execute("INSERT INTO cases(id,decision_id,review_revision,content_json,labels_json,task_family,task_lineage,language,applicability,applicability_reason,content_hash,created_at,validation_assignment_event_id,validation_context_json,verification_status,last_validated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)", params![
+                cid, id, revision, content.to_string(), labels.to_string(), task_family, task_lineage, language, applicability, applicability_reason, hash(&content), now(), validation_assignment_event_id, validation_context.map(|value|value.to_string()), verification_status, last_validated_at
             ])?;
             transaction.execute("INSERT INTO cases_fts(case_id,content) VALUES(?1,?2)", params![cid, searchable(&content)])?;
             case_id = Value::String(cid);
@@ -460,16 +479,17 @@ impl Database {
 
     fn cases_list(&self, value: Value) -> Result<Value> {
         let map = object(&value, "case list")?;
-        allowed(map, &["limit", "offset", "include_deleted"])?;
+        allowed(map, &["limit", "offset", "include_deleted", "created_after", "created_before"])?;
         let limit = bounded_limit(map.get("limit"), 50, 200)?;
         let offset = nonnegative(map.get("offset"), 0, "offset")?;
+        let (created_after,created_before)=created_bounds(map)?;
         let include_deleted = map.get("include_deleted").and_then(Value::as_bool).unwrap_or(false);
         let mut statement = self.connection.prepare(if include_deleted {
-            "SELECT id,decision_id,review_revision,content_json,labels_json,task_family,language,applicability,content_hash,active,deleted_at,created_at,applicability_reason,validation_assignment_event_id,validation_context_json,verification_status,last_validated_at FROM cases ORDER BY created_at DESC LIMIT ?1 OFFSET ?2"
+            "SELECT c.id,c.decision_id,c.review_revision,c.content_json,c.labels_json,c.task_family,c.language,c.applicability,c.content_hash,c.active,c.deleted_at,c.created_at,c.applicability_reason,c.validation_assignment_event_id,c.validation_context_json,c.verification_status,c.last_validated_at,c.task_lineage FROM cases c JOIN decisions d ON d.id=c.decision_id WHERE (?1 IS NULL OR d.created_at>=?1) AND (?2 IS NULL OR d.created_at<=?2) ORDER BY c.created_at DESC LIMIT ?3 OFFSET ?4"
         } else {
-            "SELECT id,decision_id,review_revision,content_json,labels_json,task_family,language,applicability,content_hash,active,deleted_at,created_at,applicability_reason,validation_assignment_event_id,validation_context_json,verification_status,last_validated_at FROM cases WHERE deleted_at IS NULL AND active=1 ORDER BY created_at DESC LIMIT ?1 OFFSET ?2"
+            "SELECT c.id,c.decision_id,c.review_revision,c.content_json,c.labels_json,c.task_family,c.language,c.applicability,c.content_hash,c.active,c.deleted_at,c.created_at,c.applicability_reason,c.validation_assignment_event_id,c.validation_context_json,c.verification_status,c.last_validated_at,c.task_lineage FROM cases c JOIN decisions d ON d.id=c.decision_id WHERE c.deleted_at IS NULL AND c.active=1 AND d.deleted_at IS NULL AND (?1 IS NULL OR d.created_at>=?1) AND (?2 IS NULL OR d.created_at<=?2) ORDER BY c.created_at DESC LIMIT ?3 OFFSET ?4"
         })?;
-        let items = statement.query_map(params![limit, offset], case_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let items = statement.query_map(params![created_after,created_before,limit,offset], case_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(json!({"items":items,"limit":limit,"offset":offset}))
     }
 
@@ -528,7 +548,7 @@ impl Database {
         let id = id_param(&value)?;
         let version = self.connection.query_row("SELECT id,parent_id,status,configuration_json,evaluation_json,evaluation_status,invalidated,invalidation_reason,created_at,activated_at,(SELECT COUNT(*) FROM memory_version_cases c WHERE c.version_id=memory_versions.id) FROM memory_versions WHERE id=?1", [id], version_row).optional()?
             .ok_or_else(|| anyhow!("not_found: version {id}"))?;
-        let cases = json_column(&self.connection, "SELECT json_object('id',c.id,'summary',json(c.content_json),'content',json(c.content_json),'labels',json(c.labels_json),'content_hash',mvc.case_hash,'applicability',c.applicability,'applicability_reason',c.applicability_reason,'validation_assignment_event_id',c.validation_assignment_event_id,'validation_context',json(c.validation_context_json),'verification_status',c.verification_status,'last_validated_at',c.last_validated_at) FROM memory_version_cases mvc JOIN cases c ON c.id=mvc.case_id WHERE mvc.version_id=?1 ORDER BY c.id", id)?;
+        let cases = json_column(&self.connection, "SELECT json_object('id',c.id,'summary',json(c.content_json),'content',json(c.content_json),'labels',json(c.labels_json),'content_hash',mvc.case_hash,'task_family',c.task_family,'task_lineage',c.task_lineage,'language',c.language,'applicability',c.applicability,'applicability_reason',c.applicability_reason,'validation_assignment_event_id',c.validation_assignment_event_id,'validation_context',json(c.validation_context_json),'verification_status',c.verification_status,'last_validated_at',c.last_validated_at) FROM memory_version_cases mvc JOIN cases c ON c.id=mvc.case_id WHERE mvc.version_id=?1 ORDER BY c.id", id)?;
         let mut detail = version.as_object().cloned().unwrap_or_default();
         detail.insert("case_ids".into(), Value::Array(cases.iter().filter_map(|case| case.get("id").cloned()).collect()));
         detail.insert("cases".into(), Value::Array(cases));
@@ -557,10 +577,14 @@ impl Database {
     fn versions_activate(&mut self, value: Value) -> Result<Value> {
         let id = id_param(&value)?.to_string();
         let transaction = self.connection.transaction()?;
-        let state: Option<(String, bool)> = transaction.query_row("SELECT evaluation_status,invalidated FROM memory_versions WHERE id=?1", [&id], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
-        let (evaluation, invalidated) = state.ok_or_else(|| anyhow!("not_found: version {id}"))?;
+        let state: Option<(String, bool, Option<String>)> = transaction.query_row("SELECT evaluation_status,invalidated,evaluation_json FROM memory_versions WHERE id=?1", [&id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
+        let (evaluation, invalidated, report) = state.ok_or_else(|| anyhow!("not_found: version {id}"))?;
         if invalidated { bail!("invalid: version {id} is invalidated"); }
         if evaluation != "passed" { bail!("invalid: version {id} has not passed evaluation"); }
+        let report=parse_json(report.as_deref().unwrap_or("null"))?;
+        if report["evaluator_identity"]!=EVALUATOR_IDENTITY || report["retrieval_policy_version"]!=RETRIEVAL_POLICY_VERSION || report["candidate_memory_exposure"].as_u64().unwrap_or(0)==0 {
+            bail!("invalid: version {id} evaluation is incompatible with the current retrieval policy");
+        }
         let missing: i64 = transaction.query_row("SELECT COUNT(*) FROM memory_version_cases mvc LEFT JOIN cases c ON c.id=mvc.case_id AND c.deleted_at IS NULL AND c.active=1 WHERE mvc.version_id=?1 AND c.id IS NULL", [&id], |row| row.get(0))?;
         if missing != 0 { bail!("invalid: version references deleted cases"); }
         transaction.execute("UPDATE memory_versions SET status='superseded' WHERE status='active' AND id<>?1", [&id])?;
@@ -582,27 +606,42 @@ impl Database {
         let version = explicit_version.or_else(|| self.settings_get().ok()?.get("active_memory_version")?.as_str().map(str::to_string));
         let Some(version) = version else { return Ok(json!({"version":null,"cases":[],"reason":"no_active_version"})); };
         let excludes = map.get("exclude_ids").map(string_array).transpose()?.unwrap_or_default().into_iter().collect::<HashSet<_>>();
-        let excluded_families = map.get("exclude_task_families").map(string_array).transpose()?.unwrap_or_default().into_iter().map(|family|family.to_lowercase()).collect::<HashSet<_>>();
+        let excluded_families = map.get("exclude_task_families").map(string_array).transpose()?.unwrap_or_default().into_iter().map(|family|canonical_task_family(&family)).collect::<Result<HashSet<_>>>()?;
         let configuration = map.get("configuration").and_then(Value::as_object);
-        let missing_family = configuration.and_then(|c|c.get("task_family")).and_then(Value::as_str).is_none();
-        if (!evaluation || excluded_families.is_empty()) && missing_family || configuration.and_then(|c|c.get("language")).and_then(Value::as_str).is_none() {
+        let task_family=configuration.and_then(|c|c.get("task_family")).and_then(Value::as_str).map(canonical_task_family).transpose()?;
+        let task_lineage=configuration.and_then(|c|c.get("task_lineage")).and_then(Value::as_str).map(validate_task_lineage).transpose()?;
+        if task_family.is_none() || configuration.and_then(|c|c.get("language")).and_then(Value::as_str).is_none() || evaluation && task_lineage.is_none() {
             return Ok(json!({"version":version,"cases":[],"reason":"missing_task_family_or_language_filter"}));
         }
-        let valid: Option<(bool, String, String)> = self.connection.query_row("SELECT invalidated,evaluation_status,status FROM memory_versions WHERE id=?1", [&version], |row| Ok((row.get(0)?, row.get(1)?,row.get(2)?))).optional()?;
-        let usable = matches!(valid.as_ref(),Some((false,report,_)) if report=="passed") || evaluation && matches!(valid.as_ref(),Some((false,_,status)) if status=="candidate");
+        let valid: Option<(bool, String, String, Option<String>)> = self.connection.query_row("SELECT invalidated,evaluation_status,status,evaluation_json FROM memory_versions WHERE id=?1", [&version], |row| Ok((row.get(0)?, row.get(1)?,row.get(2)?,row.get(3)?))).optional()?;
+        let compatible=valid.as_ref().and_then(|(_,_,_,report)|report.as_deref()).map(parse_json).transpose()?.as_ref().is_some_and(evaluation_report_compatible);
+        if matches!(valid.as_ref(),Some((false,report,_,_)) if report=="passed") && !compatible {
+            return Ok(json!({"version":version,"cases":[],"reason":"incompatible_evaluation_policy"}));
+        }
+        let usable = matches!(valid.as_ref(),Some((false,report,_,_)) if report=="passed"&&compatible) || evaluation && matches!(valid.as_ref(),Some((false,_,status,_)) if status=="candidate");
         if !usable { bail!("invalid: memory version is not usable"); }
         let terms = search_terms(query);
         if terms.is_empty() { return Ok(json!({"version":version,"cases":[],"reason":"no_search_terms"})); }
         let match_query = terms.iter().take(32).map(|term|format!("\"{}\"",term.replace('"',"\"\""))).collect::<Vec<_>>().join(" OR ");
-        let mut statement = self.connection.prepare("SELECT c.id,c.content_json,c.labels_json,c.task_family,c.language,c.applicability,c.content_hash,c.applicability_reason,c.validation_assignment_event_id,c.validation_context_json,c.verification_status,c.last_validated_at FROM cases_fts JOIN cases c ON c.id=cases_fts.case_id JOIN memory_version_cases mvc ON mvc.case_id=c.id WHERE cases_fts MATCH ?2 AND mvc.version_id=?1 AND c.active=1 AND c.deleted_at IS NULL ORDER BY bm25(cases_fts) LIMIT 128")?;
+        let family=task_family.as_deref().unwrap_or_default();
+        let language=configuration.and_then(|value|value.get("language")).and_then(Value::as_str).unwrap_or_default();
+        let mut statement = self.connection.prepare("SELECT c.id,c.content_json,c.labels_json,c.task_family,c.language,c.applicability,c.content_hash,c.applicability_reason,c.validation_assignment_event_id,c.validation_context_json,c.verification_status,c.last_validated_at,c.task_lineage FROM cases_fts JOIN cases c ON c.id=cases_fts.case_id JOIN memory_version_cases mvc ON mvc.case_id=c.id WHERE cases_fts MATCH ?2 AND mvc.version_id=?1 AND c.active=1 AND c.deleted_at IS NULL AND (LOWER(c.task_family)=?3 OR (?3='documentation' AND LOWER(c.task_family)='docs')) AND c.language=?4 ORDER BY bm25(cases_fts) LIMIT 128")?;
         let mut ranked = Vec::new();
-        let rows = statement.query_map(params![version,match_query], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?, row.get::<_,Option<String>>(7)?, row.get::<_,Option<String>>(8)?, row.get::<_,Option<String>>(9)?, row.get::<_,String>(10)?, row.get::<_,Option<i64>>(11)?)))?;
+        let rows = statement.query_map(params![version,match_query,family,language], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?, row.get::<_,Option<String>>(7)?, row.get::<_,Option<String>>(8)?, row.get::<_,Option<String>>(9)?, row.get::<_,String>(10)?, row.get::<_,Option<i64>>(11)?, row.get::<_,Option<String>>(12)?)))?;
         let mut applicability_exclusions=Vec::new();
+        let mut unknown_lineage=false;
         for row in rows {
-            let (id, content, labels, task_family, language, applicability, content_hash, applicability_reason, validation_assignment_event_id, validation_context, verification_status, last_validated_at) = row?;
-            if excludes.contains(&id) || task_family.as_ref().is_some_and(|family|excluded_families.contains(&family.to_lowercase())) { continue; }
-            if configuration.and_then(|value|value.get("task_family")).and_then(Value::as_str).is_some_and(|expected|task_family.as_deref()!=Some(expected)) {continue;}
+            let (id, content, labels, case_family, language, applicability, content_hash, applicability_reason, validation_assignment_event_id, validation_context, verification_status, last_validated_at, case_lineage) = row?;
+            let canonical_case_family=case_family.as_deref().map(canonical_task_family).transpose()?;
+            if excludes.contains(&id) || canonical_case_family.as_ref().is_some_and(|family|excluded_families.contains(family)) { continue; }
+            if canonical_case_family.as_ref()!=task_family.as_ref() {continue;}
             if configuration.and_then(|value|value.get("language")).and_then(Value::as_str).is_some_and(|expected|language.as_deref()!=Some(expected)) {continue;}
+            if evaluation {
+                let Some(case_lineage)=case_lineage.as_deref() else {unknown_lineage=true;continue;};
+                if Some(case_lineage)==task_lineage.as_deref() {continue;}
+            } else if task_lineage.as_deref().is_some_and(|lineage|case_lineage.as_deref()==Some(lineage)) {
+                continue;
+            }
             if configuration.and_then(|value|value.get("applicability")).and_then(Value::as_str).is_some_and(|expected|applicability!=expected) {continue;}
             let validation_context=validation_context.as_deref().map(parse_json).transpose()?;
             match configuration_matches(configuration,&applicability,&verification_status,validation_context.as_ref()) {
@@ -625,7 +664,7 @@ impl Database {
             bytes += size;
             cases.push(json!({"id":id,"summary":summary,"content":summary,"labels":parse_json(&labels)?,"applicability":applicability,"applicability_reason":applicability_reason,"validation_assignment_event_id":validation_assignment_event_id,"validation_context":validation_context,"verification_status":verification_status,"last_validated_at":last_validated_at,"content_hash":content_hash,"match_count":score}));
         }
-        let reason=if !cases.is_empty(){"matched"}else if applicability_exclusions.iter().any(|item|item["status"]=="unknown"){"applicability_unknown"}else if !applicability_exclusions.is_empty(){"needs_revalidation"}else{"no_match"};
+        let reason=if !cases.is_empty(){"matched"}else if unknown_lineage{"unknown_lineage"}else if applicability_exclusions.iter().any(|item|item["status"]=="unknown"){"applicability_unknown"}else if !applicability_exclusions.is_empty(){"needs_revalidation"}else{"no_match"};
         Ok(json!({"version":version,"cases":cases,"reason":reason,"applicability_exclusions":applicability_exclusions}))
     }
 
@@ -836,7 +875,150 @@ impl Database {
         Ok(json!({"removed":removed,"cutoff":cutoff}))
     }
 
+    fn dashboard_summary(&self, created_after:Option<i64>, created_before:Option<i64>) -> Result<Value> {
+        let mut statement=self.connection.prepare("SELECT f.decision_id,f.attempt_ref,f.payload_json,d.created_at FROM feedback_events f JOIN decisions d ON d.id=f.decision_id WHERE f.kind='usage' AND d.deleted_at IS NULL ORDER BY f.receive_sequence")?;
+        let rows=statement.query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,i64>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut reports:HashMap<(String,String),Vec<Value>>=HashMap::new();
+        let mut stream_owners:HashMap<String,HashSet<(String,String)>>=HashMap::new();
+        for (decision,attempt,payload,created_at) in rows {
+            let payload:Value=serde_json::from_str(&payload)?;
+            if let Some(stream)=payload.get("usage_stream_id").and_then(Value::as_str){stream_owners.entry(stream.to_string()).or_default().insert((decision.clone(),attempt.clone()));}
+            if in_created_range(created_at,created_after,created_before) {reports.entry((decision,attempt)).or_default().push(payload);}
+        }
+        let reused_streams=stream_owners.into_iter().filter_map(|(stream,owners)|(owners.len()>1).then_some(stream)).collect::<HashSet<_>>();
+        let mut total=0u64;
+        let mut included=0u64;
+        let mut excluded=0u64;
+        let mut overflow=false;
+        let mut exclusion_reasons:HashMap<&'static str,u64>=HashMap::new();
+        for group in reports.values() {
+            let mut ordered_streams:HashMap<&str,Vec<&Value>>=HashMap::new();
+            let mut legacy=Vec::new();
+            for report in group {
+                if let Some(stream)=report.get("usage_stream_id").and_then(Value::as_str) {ordered_streams.entry(stream).or_default().push(report);}
+                else if report["scope"]=="attempt" {legacy.push(report);}
+                else if let Some(reason)=usage_exclusion_reason(report) {
+                    *exclusion_reasons.entry(reason).or_default()+=1;
+                    excluded+=1;
+                }
+            }
+            let selected=if ordered_streams.len()>1 {
+                let count=ordered_streams.values().map(Vec::len).sum::<usize>() as u64;
+                *exclusion_reasons.entry("multiple_ordered_streams").or_default()+=count;
+                excluded+=count;
+                None
+            } else if !ordered_streams.is_empty()&&!legacy.is_empty() {
+                let count=ordered_streams.values().map(Vec::len).sum::<usize>() as u64+legacy.len() as u64;
+                *exclusion_reasons.entry("mixed_ordered_and_legacy").or_default()+=count;
+                excluded+=count;
+                None
+            } else if let Some((stream_id,stream))=ordered_streams.into_iter().next() {
+                if reused_streams.contains(stream_id) {
+                    *exclusion_reasons.entry("usage_stream_reused").or_default()+=stream.len() as u64;
+                    excluded+=stream.len() as u64;
+                    None
+                } else {
+                    let mut sequences:HashMap<u64,&Value>=HashMap::new();
+                    let mut conflict=false;
+                    for report in &stream {
+                        let sequence=report["source_sequence"].as_u64().expect("validated usage source_sequence");
+                        if sequences.get(&sequence).is_some_and(|existing|*existing!=*report){conflict=true;}
+                        else {sequences.entry(sequence).or_insert(report);}
+                    }
+                    if conflict {
+                        *exclusion_reasons.entry("ordered_sequence_conflict").or_default()+=stream.len() as u64;
+                        excluded+=stream.len() as u64;
+                        None
+                    } else if let Some((_,report))=sequences.into_iter().max_by_key(|(sequence,_)|*sequence) {
+                        if let Some(reason)=usage_exclusion_reason(report) {
+                            *exclusion_reasons.entry(reason).or_default()+=1;
+                            excluded+=1;
+                            None
+                        } else {Some(report)}
+                    } else {None}
+                }
+            } else if legacy.is_empty() {
+                None
+            } else {
+                let signature=legacy_usage_signature(legacy[0]);
+                if legacy.iter().all(|report|legacy_usage_signature(report)==signature) {
+                    if let Some(reason)=usage_exclusion_reason(legacy[0]) {
+                        *exclusion_reasons.entry(reason).or_default()+=1;
+                        excluded+=1;
+                        None
+                    } else {Some(legacy[0])}
+                }
+                else {
+                    *exclusion_reasons.entry("legacy_reports_ambiguous").or_default()+=legacy.len() as u64;
+                    excluded+=legacy.len() as u64;
+                    None
+                }
+            };
+            if let Some(report)=selected {
+                included+=1;
+                let tokens=report["total_tokens"].as_u64().expect("eligible usage total_tokens");
+                if !overflow {
+                    if let Some(sum)=total.checked_add(tokens).filter(|sum|*sum<=9_007_199_254_740_991){total=sum;}else{overflow=true;}
+                }
+            }
+        }
+        let query=format!("{} SELECT COALESCE(SUM(uncertain),0),COALESCE(SUM(problem_score),0),COALESCE(SUM(uncertain AND problem_score),0),COALESCE(SUM(review_disagreement OR reported_label_change),0) FROM review_queue WHERE deleted_at IS NULL AND latest_review_status='pending' AND (?1 IS NULL OR created_at>=?1) AND (?2 IS NULL OR created_at<=?2)",review_queue_cte());
+        let (uncertain,problem,both,corrections):(i64,i64,i64,i64)=self.connection.query_row(&query,params![created_after,created_before],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))?;
+        let reviewed:i64=self.connection.query_row("SELECT COUNT(*) FROM cases c JOIN decisions d ON d.id=c.decision_id WHERE c.active=1 AND c.deleted_at IS NULL AND d.deleted_at IS NULL AND (?1 IS NULL OR d.created_at>=?1) AND (?2 IS NULL OR d.created_at<=?2)",params![created_after,created_before],|row|row.get(0))?;
+        let evaluated:i64=self.connection.query_row("SELECT COUNT(*) FROM memory_versions WHERE evaluation_json IS NOT NULL AND (?1 IS NULL OR created_at>=?1) AND (?2 IS NULL OR created_at<=?2)",params![created_after,created_before],|row|row.get(0))?;
+        let mut models=self.connection.prepare("WITH latest AS (SELECT e.*,ROW_NUMBER() OVER(PARTITION BY e.decision_id,e.attempt_ref ORDER BY e.id DESC) AS rank FROM execution_attempts e JOIN decisions d ON d.id=e.decision_id WHERE d.deleted_at IS NULL AND (?1 IS NULL OR d.created_at>=?1) AND (?2 IS NULL OR d.created_at<=?2)) SELECT json_extract(effective_json,'$.model'),json_extract(effective_json,'$.reasoning_effort'),COUNT(*) FROM latest WHERE rank=1 GROUP BY 1,2 ORDER BY COUNT(*) DESC,1,2")?;
+        let distribution=models.query_map(params![created_after,created_before],|row|Ok(json!({"model":row.get::<_,Option<String>>(0)?,"reasoning_effort":row.get::<_,Option<String>>(1)?,"attempts":row.get::<_,i64>(2)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let aggregation_status=if overflow{"overflow"}else if included==0{"unavailable"}else if excluded>0{"partial"}else{"available"};
+        let manifests={
+            let mut statement=self.connection.prepare("SELECT f.event_id,f.payload_json FROM feedback_events f JOIN decisions d ON d.id=f.decision_id WHERE f.kind='run_manifest' AND d.deleted_at IS NULL ORDER BY f.receive_sequence")?;
+            let values=statement.query_map([],|row|Ok((row.get::<_,String>(0)?,parse_sql_json(row.get(1)?)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            let scopes=values.iter().map(|(event_id,payload)|Ok((event_id.clone(),manifest_created_scope(&self.connection,payload,created_after,created_before)?))).collect::<Result<HashMap<_,_>>>()?;
+            let in_scope=scopes.iter().filter_map(|(event_id,(_,all))|all.then_some(event_id.clone())).collect::<HashSet<_>>();
+            let included=values.iter().filter(|(event_id,_)|in_scope.contains(event_id)).map(|(_,payload)|payload.clone()).collect::<Vec<_>>();
+            let mut selected=Vec::new();
+            for (event_id,mut payload) in values {
+                if in_scope.contains(&event_id) {selected.push(crate::scenario::ManifestRecord {event_id,payload});continue;}
+                let crosses_boundary=scopes.get(&event_id).is_some_and(|(any,all)|*any&&!*all);
+                if !crosses_boundary&&!included.iter().any(|candidate|manifest_collides(&self.connection,candidate,&payload).unwrap_or(true)){continue;}
+                if let Some(map)=payload.as_object_mut(){map.remove("scenario");}
+                selected.push(crate::scenario::ManifestRecord {event_id,payload});
+            }
+            selected
+        };
+        let scenario_usages={
+            let mut statement=self.connection.prepare("SELECT f.event_id,f.decision_id,f.attempt_ref,f.payload_json FROM feedback_events f JOIN decisions d ON d.id=f.decision_id WHERE f.kind='usage' AND d.deleted_at IS NULL ORDER BY f.receive_sequence")?;
+            let values=statement.query_map([],|row|Ok(crate::scenario::UsageRecord {event_id:row.get(0)?,decision_id:row.get(1)?,attempt_ref:row.get(2)?,payload:parse_sql_json(row.get(3)?)?}))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            values
+        };
+        let scenario=crate::scenario::summarize(manifests,scenario_usages);
+        let estimated_saved=scenario["saved"]["central"].clone();
+        let baseline_status=if scenario["status"]=="unavailable"{"collecting_inputs"}else{"scenario_estimate"};
+        Ok(json!({"tokens":{"recorded_total":if included>0&&!overflow {Some(total)} else {None},"included_attempts":included,"excluded_reports":excluded,"aggregation_status":aggregation_status,"exclusion_reasons":exclusion_reasons,"scope":"verified_non_overlapping_attempt_streams","estimated_saved":estimated_saved,"baseline_status":baseline_status,"scenario":scenario},"learning":{"uncertain_pending":uncertain,"problem_pending":problem,"uncertain_with_problem_pending":both,"reviewer_corrections_pending":corrections,"reviewed_cases":reviewed,"evaluated_versions":evaluated},"execution_models":distribution,"time_scope":{"default":"decision.created_at","evaluated_versions":"memory_versions.created_at","created_after":created_after,"created_before":created_before}}))
+    }
+
+    fn overview(&self,value:Value)->Result<Value> {
+        let map=object(&value,"overview")?;
+        allowed(map,&["created_after","created_before"])?;
+        let (created_after,created_before)=created_bounds(map)?;
+        let risk_query=format!("{} SELECT CASE WHEN risk IN ('low','medium','high') THEN risk ELSE 'unknown' END,COUNT(*) FROM review_queue WHERE deleted_at IS NULL AND (?1 IS NULL OR created_at>=?1) AND (?2 IS NULL OR created_at<=?2) GROUP BY 1",review_queue_cte());
+        let mut risk_statement=self.connection.prepare(&risk_query)?;
+        let risk_rows=risk_statement.query_map(params![created_after,created_before],|row|Ok((row.get::<_,String>(0)?,row.get::<_,i64>(1)?)))?;
+        let mut risk_counts=json!({"low":0,"medium":0,"high":0,"unknown":0});
+        for row in risk_rows {let (key,count)=row?;risk_counts[key]=json!(count);}
+        let decisions:i64=self.connection.query_row("SELECT COUNT(*) FROM decisions WHERE deleted_at IS NULL AND (?1 IS NULL OR created_at>=?1) AND (?2 IS NULL OR created_at<=?2)",params![created_after,created_before],|row|row.get(0))?;
+        let feedback:i64=self.connection.query_row("SELECT COUNT(*) FROM feedback_events f JOIN decisions d ON d.id=f.decision_id WHERE d.deleted_at IS NULL AND (?1 IS NULL OR d.created_at>=?1) AND (?2 IS NULL OR d.created_at<=?2)",params![created_after,created_before],|row|row.get(0))?;
+        let pending_query=format!("{} SELECT COUNT(*) FROM review_queue WHERE deleted_at IS NULL AND latest_review_status='pending' AND review_priority>0 AND (?1 IS NULL OR created_at>=?1) AND (?2 IS NULL OR created_at<=?2)",review_queue_cte());
+        let pending_reviews:i64=self.connection.query_row(&pending_query,params![created_after,created_before],|row|row.get(0))?;
+        let protected_decisions:i64=self.connection.query_row("SELECT COUNT(*) FROM decisions WHERE protected=1 AND deleted_at IS NULL AND (?1 IS NULL OR created_at>=?1) AND (?2 IS NULL OR created_at<=?2)",params![created_after,created_before],|row|row.get(0))?;
+        Ok(json!({"dashboard":self.dashboard_summary(created_after,created_before)?,"counts":{"decisions":decisions,"feedback":feedback,"pending_reviews":pending_reviews,"protected_decisions":protected_decisions},"risk_counts":risk_counts}))
+    }
+
     fn status(&self) -> Result<Value> {
+        let risk_query=format!("{} SELECT CASE WHEN risk IN ('low','medium','high') THEN risk ELSE 'unknown' END,COUNT(*) FROM review_queue WHERE deleted_at IS NULL GROUP BY 1",review_queue_cte());
+        let mut risk_statement=self.connection.prepare(&risk_query)?;
+        let risk_rows=risk_statement.query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,i64>(1)?)))?;
+        let mut risk_counts=json!({"low":0,"medium":0,"high":0,"unknown":0});
+        for row in risk_rows {let (key,count)=row?;risk_counts[key]=json!(count);}
         let decision_count: i64 = self.connection.query_row("SELECT COUNT(*) FROM decisions WHERE deleted_at IS NULL", [], |row| row.get(0))?;
         let feedback_count: i64 = self.connection.query_row("SELECT COUNT(*) FROM feedback_events", [], |row| row.get(0))?;
         let pending_query=format!("{} SELECT COUNT(*) FROM review_queue WHERE deleted_at IS NULL AND latest_review_status='pending' AND review_priority>0",review_queue_cte());
@@ -853,8 +1035,30 @@ impl Database {
         let known_attempts:i64=self.connection.query_row("SELECT COUNT(DISTINCT attempt_ref) FROM execution_attempts",[],|row|row.get(0))?;
         let attempts_with_initial_scores:i64=self.connection.query_row("SELECT COUNT(DISTINCT e.attempt_ref) FROM execution_attempts e WHERE EXISTS(SELECT 1 FROM feedback_scores s WHERE s.attempt_ref=e.attempt_ref AND s.phase='initial')",[],|row|row.get(0))?;
         let known_attempts_missing_initial_scores:i64=self.connection.query_row("SELECT COUNT(DISTINCT e.attempt_ref) FROM execution_attempts e WHERE NOT EXISTS(SELECT 1 FROM feedback_scores s WHERE s.attempt_ref=e.attempt_ref AND s.phase='initial')",[],|row|row.get(0))?;
-        Ok(json!({"ok":true,"schema_version":SCHEMA_VERSION,"settings":settings,"counts":{"decisions":decision_count,"feedback":feedback_count,"pending_reviews":pending_reviews,"protected_decisions":protected_count,"unrecorded_runtime":self.unrecorded.len()},"initial_score_coverage":{"known_attempts":known_attempts,"attempts_with_initial_scores":attempts_with_initial_scores,"known_attempts_missing_initial_scores":known_attempts_missing_initial_scores,"scope":"known_attempts_only","complete":Value::Null},"latest_event":latest_event,"database_bytes":database_bytes,"wal_bytes":wal_bytes,"evidence_bytes":evidence_bytes,"pending_evidence_cleanup":pending_evidence_cleanup,"evidence_cleanup_error":self.evidence_cleanup_error,"storage_bytes":storage_bytes,"storage_soft_limit_bytes":soft_limit,"storage_pressure":storage_bytes>soft_limit}))
+        Ok(json!({"ok":true,"schema_version":SCHEMA_VERSION,"settings":settings,"risk_counts":risk_counts,"dashboard":self.dashboard_summary(None,None)?,"counts":{"decisions":decision_count,"feedback":feedback_count,"pending_reviews":pending_reviews,"protected_decisions":protected_count,"unrecorded_runtime":self.unrecorded.len()},"initial_score_coverage":{"known_attempts":known_attempts,"attempts_with_initial_scores":attempts_with_initial_scores,"known_attempts_missing_initial_scores":known_attempts_missing_initial_scores,"scope":"known_attempts_only","complete":Value::Null},"latest_event":latest_event,"database_bytes":database_bytes,"wal_bytes":wal_bytes,"evidence_bytes":evidence_bytes,"pending_evidence_cleanup":pending_evidence_cleanup,"evidence_cleanup_error":self.evidence_cleanup_error,"storage_bytes":storage_bytes,"storage_soft_limit_bytes":soft_limit,"storage_pressure":storage_bytes>soft_limit}))
     }
+}
+
+fn legacy_usage_signature(report:&Value)->Value {
+    json!({
+        "total_tokens":report.get("total_tokens"),
+        "input_tokens":report.get("input_tokens"),
+        "output_tokens":report.get("output_tokens"),
+        "source":report.get("source"),
+        "source_verified":report.get("source_verified"),
+        "scope":report.get("scope"),
+        "checkpoint":report.get("checkpoint"),
+        "parent_scope":report.get("parent_scope"),
+        "overlap_status":report.get("overlap_status")
+    })
+}
+
+fn usage_exclusion_reason(report:&Value)->Option<&'static str> {
+    if report["source_verified"]!=true {Some("unverified_source")}
+    else if report["scope"]!="attempt" {Some("ineligible_scope")}
+    else if report["overlap_status"]!="non_overlapping" {Some("overlap_not_non_overlapping")}
+    else if report["total_tokens"].as_u64().is_none() {Some("unknown_total_tokens")}
+    else {None}
 }
 
 fn validate_feedback(value: &Value) -> Result<()> {
@@ -866,26 +1070,27 @@ fn validate_feedback(value: &Value) -> Result<()> {
     required_string(map,"decision_id",128)?;
     required_string(map,"attempt_ref",128)?;
     let kind = required_string(map,"kind",32)?;
-    if !["assignment","test","review","outcome","user_choice","usage"].contains(&kind) { bail!("invalid: feedback kind"); }
+    if !["assignment","test","review","outcome","user_choice","usage","run_manifest"].contains(&kind) { bail!("invalid: feedback kind"); }
     let source = object(map.get("source").ok_or_else(|| anyhow!("invalid: source is required"))?, "feedback source")?;
     allowed(source,&["host","role","actor_type"])?;
     required_string(source,"host",128)?;
     required_string(source,"role",128)?;
     if required_string(source,"actor_type",32)? != "agent" { bail!("invalid: source.actor_type must be agent"); }
     let payload = object(map.get("payload").ok_or_else(|| anyhow!("invalid: payload is required"))?, "feedback payload")?;
-    let common = ["scores","reason","evidence_refs"];
+    let common: &[&str] = if kind=="run_manifest" {&[]} else {&["scores","reason","evidence_refs"]};
     let specific: &[&str] = match kind {
         "assignment" => &["recommended","selected","requested","effective","parent_attempt_ref","change_reason","mixed_configuration","environment"],
         "test" => &["result","status","scope","test_scope","code_revision","summary"],
         "review" => &["outcome","status","disposition","proposed_labels","summary"],
         "outcome" => &["outcome","status","summary","failure_reason"],
         "user_choice" => &["choice","accepted","selected","summary"],
-        "usage" => &["total_tokens","input_tokens","output_tokens","source","source_verified","scope","checkpoint","parent_scope","overlap_status"],
+        "usage" => &["total_tokens","input_tokens","output_tokens","source","source_verified","scope","checkpoint","parent_scope","overlap_status","aggregation","usage_stream_id","source_sequence"],
+        "run_manifest" => &["manifest_version","run_id","host_root_ref","mode","observed_at","terminal_checkpoint","context","meter","segments","outcome_event_ids","coverage","scenario"],
         _ => &[],
     };
     let mut accepted = common.to_vec(); accepted.extend_from_slice(specific);
     allowed(payload,&accepted)?;
-    validate_optional_common(payload)?;
+    if kind!="run_manifest" {validate_optional_common(payload)?;}
     if let Some(scores) = payload.get("scores") {
         let scores = scores.as_array().ok_or_else(|| anyhow!("invalid: payload.scores must be an array"))?;
         for score in scores { validate_score(score)?; }
@@ -902,6 +1107,8 @@ fn validate_feedback(value: &Value) -> Result<()> {
         optional_string(payload,"change_reason",8192)?;
         if let Some(value)=payload.get("mixed_configuration"){require_bool(value,"mixed_configuration")?;}
         if let Some(value)=payload.get("environment"){if !value.is_null(){object(value,"assignment environment")?;}}
+    } else if kind == "run_manifest" {
+        validate_run_manifest_payload(payload,map["decision_id"].as_str().unwrap())?;
     } else {
         validate_kind_payload(kind,payload)?;
     }
@@ -993,8 +1200,128 @@ fn validate_kind_payload(kind:&str,payload:&Map<String,Value>)->Result<()> {
                 optional_enum(payload,"overlap_status",&["non_overlapping","overlapping","unknown"])?;
             }
             optional_nullable_text(payload,"parent_scope",512)?;
+            let ordered_fields=["aggregation","usage_stream_id","source_sequence"];
+            let ordered_count=ordered_fields.iter().filter(|key|payload.contains_key(**key)).count();
+            if ordered_count!=0&&ordered_count!=ordered_fields.len(){bail!("invalid: ordered usage requires aggregation, usage_stream_id, and source_sequence together");}
+            if ordered_count==ordered_fields.len() {
+                if required_string(payload,"aggregation",32)?!="cumulative" {bail!("invalid: ordered usage aggregation must be cumulative");}
+                required_string(payload,"usage_stream_id",128)?;
+                if payload.get("source_sequence").and_then(Value::as_u64).map_or(true,|value|value==0){bail!("invalid: ordered usage source_sequence must be a positive integer");}
+                if !payload.contains_key("total_tokens")||payload.get("scope").and_then(Value::as_str)!=Some("attempt"){bail!("invalid: ordered usage requires an explicit scope=attempt total");}
+                required_string(payload,"source",1024)?;
+                if payload.get("source_verified").and_then(Value::as_bool).is_none(){bail!("invalid: ordered usage requires source_verified");}
+                if !payload.contains_key("checkpoint"){bail!("invalid: ordered usage requires explicit checkpoint");}
+                optional_string(payload,"checkpoint",512)?;
+                let overlap=required_string(payload,"overlap_status",64)?;
+                if !["non_overlapping","overlapping","unknown"].contains(&overlap){bail!("invalid: usage overlap_status");}
+            }
         }
         _=>{}
+    }
+    Ok(())
+}
+
+fn validate_run_manifest_payload(payload:&Map<String,Value>,anchor_decision_id:&str)->Result<()> {
+    if payload.get("manifest_version").and_then(Value::as_u64)!=Some(1){bail!("invalid: run manifest manifest_version must be 1");}
+    required_string(payload,"run_id",512)?;
+    required_string(payload,"host_root_ref",512)?;
+    let mode=required_string(payload,"mode",32)?;
+    if !["baseline","laya"].contains(&mode){bail!("invalid: run manifest mode");}
+    validate_observed_at(required_string(payload,"observed_at",512)?)?;
+    required_string(payload,"terminal_checkpoint",512)?;
+    let context=object(payload.get("context").ok_or_else(||anyhow!("invalid: run manifest context is required"))?,"run manifest context")?;
+    let context_fields=["task_snapshot_hash","code_revision","test_snapshot_hash","tool_environment_id","external_inputs_hash","acceptance_policy"];
+    allowed(context,&context_fields)?;
+    for field in context_fields {
+        if !context.contains_key(field){bail!("invalid: run manifest context.{field} is required");}
+        optional_string(context,field,512)?;
+    }
+    let meter=object(payload.get("meter").ok_or_else(||anyhow!("invalid: run manifest meter is required"))?,"run manifest meter")?;
+    allowed(meter,&["unit","identity","scope","excluded_components"])?;
+    if required_string(meter,"unit",32)?!="tokens"{bail!("invalid: run manifest meter.unit must be tokens");}
+    if !meter.contains_key("identity"){bail!("invalid: run manifest meter.identity is required");}
+    optional_string(meter,"identity",512)?;
+    if required_string(meter,"scope",32)?!="host_only"{bail!("invalid: run manifest meter.scope must be host_only");}
+    if meter.get("excluded_components")!=Some(&json!(["local_laya_inference"])){bail!("invalid: run manifest meter.excluded_components must contain only local_laya_inference");}
+    let segments=payload.get("segments").and_then(Value::as_array).ok_or_else(||anyhow!("invalid: run manifest segments must be an array"))?;
+    if segments.is_empty()||segments.len()>128{bail!("invalid: run manifest segments must contain 1 to 128 items");}
+    let mut identities=HashSet::new();
+    let mut usage_event_ids=HashSet::new();
+    let mut includes_anchor=false;
+    for segment in segments {
+        let segment=object(segment,"run manifest segment")?;
+        allowed(segment,&["decision_id","attempt_ref","usage_event_id"])?;
+        let decision_id=required_string(segment,"decision_id",512)?;
+        let attempt_ref=required_string(segment,"attempt_ref",512)?;
+        let usage_event_id=required_string(segment,"usage_event_id",512)?;
+        if !identities.insert((decision_id,attempt_ref)){bail!("invalid: duplicate run manifest segment identity");}
+        if !usage_event_ids.insert(usage_event_id){bail!("invalid: duplicate run manifest usage event reference");}
+        includes_anchor|=decision_id==anchor_decision_id;
+    }
+    if !includes_anchor{bail!("invalid: run manifest must include its anchor decision");}
+    let outcomes=bounded_manifest_string_array(payload.get("outcome_event_ids"),"outcome_event_ids",false)?;
+    if outcomes.len()!=outcomes.iter().collect::<HashSet<_>>().len(){bail!("invalid: duplicate run manifest outcome event reference");}
+    let coverage=object(payload.get("coverage").ok_or_else(||anyhow!("invalid: run manifest coverage is required"))?,"run manifest coverage")?;
+    allowed(coverage,&["status","evidence_refs"])?;
+    let status=required_string(coverage,"status",32)?;
+    if !["complete","partial","unknown"].contains(&status){bail!("invalid: run manifest coverage.status");}
+    let evidence=bounded_manifest_string_array(coverage.get("evidence_refs"),"coverage.evidence_refs",true)?;
+    if evidence.len()!=evidence.iter().collect::<HashSet<_>>().len(){bail!("invalid: duplicate run manifest coverage evidence reference");}
+    if let Some(scenario)=payload.get("scenario") {
+        let scenario=object(scenario,"run manifest scenario")?;
+        allowed(scenario,&["orchestrator_model","reasoning_effort","initial_context_tokens","stages","input_source"])?;
+        required_string(scenario,"orchestrator_model",256)?;
+        if !scenario.get("reasoning_effort").is_some_and(Value::is_null){required_string(scenario,"reasoning_effort",64)?;}
+        bounded_u64(scenario.get("initial_context_tokens"),"scenario.initial_context_tokens",0,1_000_000_000)?;
+        required_string(scenario,"input_source",512)?;
+        let stages=scenario.get("stages").and_then(Value::as_array).ok_or_else(||anyhow!("invalid: run manifest scenario.stages must be an array"))?;
+        if stages.is_empty()||stages.len()>128{bail!("invalid: run manifest scenario.stages must contain 1 to 128 items");}
+        for stage in stages {
+            let stage=object(stage,"run manifest scenario stage")?;
+            allowed(stage,&["context_growth_tokens","work_output_tokens","passes"])?;
+            bounded_u64(stage.get("context_growth_tokens"),"scenario.stages.context_growth_tokens",0,1_000_000_000)?;
+            bounded_u64(stage.get("work_output_tokens"),"scenario.stages.work_output_tokens",0,1_000_000_000)?;
+            bounded_u64(stage.get("passes"),"scenario.stages.passes",1,100)?;
+        }
+    }
+    Ok(())
+}
+
+fn bounded_u64(value:Option<&Value>,key:&str,min:u64,max:u64)->Result<u64> {
+    let value=value.and_then(Value::as_u64).ok_or_else(||anyhow!("invalid: run manifest {key} must be an integer"))?;
+    if value<min||value>max{bail!("invalid: run manifest {key} out of range");}
+    Ok(value)
+}
+
+fn bounded_manifest_string_array(value:Option<&Value>,key:&str,nonempty:bool)->Result<Vec<String>> {
+    let value=value.ok_or_else(||anyhow!("invalid: run manifest {key} is required"))?;
+    let values=value.as_array().ok_or_else(||anyhow!("invalid: run manifest {key} must be an array"))?;
+    if values.len()>128||nonempty&&values.is_empty(){bail!("invalid: run manifest {key} size");}
+    values.iter().map(|value|required_string_value(value,key,512).map(str::to_string)).collect()
+}
+
+fn validate_run_manifest_references(connection:&Connection,event:&Map<String,Value>)->Result<()> {
+    let payload=event["payload"].as_object().unwrap();
+    let mut identities=HashSet::new();
+    for segment in payload["segments"].as_array().unwrap() {
+        let decision_id=segment["decision_id"].as_str().unwrap();
+        let attempt_ref=segment["attempt_ref"].as_str().unwrap();
+        let usage_event_id=segment["usage_event_id"].as_str().unwrap();
+        let referenced:Option<(String,Option<String>,String,bool)>=connection.query_row("SELECT f.decision_id,f.attempt_ref,f.kind,d.deleted_at IS NOT NULL FROM feedback_events f JOIN decisions d ON d.id=f.decision_id WHERE f.event_id=?1",[usage_event_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional()?;
+        let Some((stored_decision,stored_attempt,kind,deleted))=referenced else{
+            let deleted:Option<bool>=connection.query_row("SELECT deleted_at IS NOT NULL FROM decisions WHERE id=?1",[decision_id],|row|row.get(0)).optional()?;
+            if deleted==Some(true){bail!("not_found: run manifest usage event {usage_event_id} belongs to deleted decision {decision_id}");}
+            bail!("waiting_dependency: run manifest usage event {usage_event_id} has not arrived");
+        };
+        if deleted{bail!("not_found: run manifest usage event {usage_event_id} belongs to deleted decision {stored_decision}");}
+        if kind!="usage"||stored_decision!=decision_id||stored_attempt.as_deref()!=Some(attempt_ref){bail!("invalid: run manifest usage event {usage_event_id} does not match its segment identity");}
+        identities.insert((decision_id.to_string(),attempt_ref.to_string()));
+    }
+    for outcome_event_id in payload["outcome_event_ids"].as_array().unwrap().iter().map(|value|value.as_str().unwrap()) {
+        let referenced:Option<(String,Option<String>,String,bool)>=connection.query_row("SELECT f.decision_id,f.attempt_ref,f.kind,d.deleted_at IS NOT NULL FROM feedback_events f JOIN decisions d ON d.id=f.decision_id WHERE f.event_id=?1",[outcome_event_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional()?;
+        let Some((decision_id,attempt_ref,kind,deleted))=referenced else{bail!("waiting_dependency: run manifest outcome event {outcome_event_id} has not arrived");};
+        if deleted{bail!("not_found: run manifest outcome event {outcome_event_id} belongs to deleted decision {decision_id}");}
+        if kind!="outcome"||attempt_ref.is_none_or(|attempt_ref|!identities.contains(&(decision_id.clone(),attempt_ref))){bail!("invalid: run manifest outcome event {outcome_event_id} does not match a segment identity");}
     }
     Ok(())
 }
@@ -1064,6 +1391,7 @@ fn migrate(connection:&Connection)->Result<()> {
     if version<1 {transaction.execute_batch(MIGRATION_1)?;}
     if version<2 {transaction.execute_batch(MIGRATION_2)?;}
     if version<3 {transaction.execute_batch(MIGRATION_3)?;}
+    if version<4 {transaction.execute_batch(MIGRATION_4)?;}
     transaction.pragma_update(None,"user_version",SCHEMA_VERSION)?;
     transaction.commit()?;
     Ok(())
@@ -1216,6 +1544,7 @@ fn purge_decision(root:&Path,transaction:&Transaction<'_>,id:&str,deleted_at:i64
         values
     };
     scrub_case_references(root,transaction,&case_ids)?;
+    remove_cross_decision_run_manifests(transaction,id)?;
     invalidate_for_decision(transaction,id,"decision deleted")?;
     transaction.execute("DELETE FROM cases_fts WHERE case_id IN (SELECT id FROM cases WHERE decision_id=?1)",[id])?;
     transaction.execute("DELETE FROM memory_version_cases WHERE case_id IN (SELECT id FROM cases WHERE decision_id=?1)",[id])?;
@@ -1226,6 +1555,27 @@ fn purge_decision(root:&Path,transaction:&Transaction<'_>,id:&str,deleted_at:i64
     transaction.execute("DELETE FROM model_observations WHERE decision_id=?1",[id])?;
     transaction.execute("DELETE FROM decision_snapshots WHERE decision_id=?1",[id])?;
     transaction.execute("UPDATE decisions SET request_json='null',result_json=NULL,error_json=NULL,context_json=NULL,recording_status='deleted',protected=0,deleted_at=?2 WHERE id=?1",params![id,deleted_at])?;
+    Ok(())
+}
+
+fn remove_cross_decision_run_manifests(transaction:&Transaction<'_>,decision_id:&str)->Result<()> {
+    let referenced_event_ids={
+        let mut statement=transaction.prepare("SELECT event_id FROM feedback_events WHERE decision_id=?1")?;
+        let values=statement.query_map([decision_id],|row|row.get::<_,String>(0))?.collect::<rusqlite::Result<HashSet<_>>>()?;
+        values
+    };
+    let manifests={
+        let mut statement=transaction.prepare("SELECT event_id,payload_json FROM feedback_events WHERE kind='run_manifest' AND decision_id<>?1")?;
+        let values=statement.query_map([decision_id],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        values
+    };
+    for (event_id,text) in manifests {
+        let payload=parse_json(&text)?;
+        let references_decision=payload["segments"].as_array().is_some_and(|segments|segments.iter().any(|segment| {
+            segment["decision_id"]==decision_id||segment["usage_event_id"].as_str().is_some_and(|id|referenced_event_ids.contains(id))
+        }))||payload["outcome_event_ids"].as_array().is_some_and(|events|events.iter().any(|event|event.as_str().is_some_and(|id|referenced_event_ids.contains(id))));
+        if references_decision {transaction.execute("DELETE FROM feedback_events WHERE event_id=?1",[event_id])?;}
+    }
     Ok(())
 }
 
@@ -1369,11 +1719,15 @@ fn apply_review_queue_fields_at(row:&rusqlite::Row<'_>,decision:&mut Value,risk_
 
 fn case_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     let content = parse_sql_json(row.get::<_,String>(3)?)?;
-    Ok(json!({"id":row.get::<_,String>(0)?,"decision_id":row.get::<_,String>(1)?,"review_revision":row.get::<_,i64>(2)?,"summary":content,"content":content,"labels":parse_sql_json(row.get::<_,String>(4)?)?,"task_family":row.get::<_,Option<String>>(5)?,"language":row.get::<_,Option<String>>(6)?,"applicability":row.get::<_,String>(7)?,"content_hash":row.get::<_,String>(8)?,"active":row.get::<_,bool>(9)?,"deleted_at":row.get::<_,Option<i64>>(10)?,"created_at":row.get::<_,i64>(11)?,"applicability_reason":row.get::<_,Option<String>>(12)?,"validation_assignment_event_id":row.get::<_,Option<String>>(13)?,"validation_context":optional_sql_json(row.get::<_,Option<String>>(14)?)?,"verification_status":row.get::<_,String>(15)?,"last_validated_at":row.get::<_,Option<i64>>(16)?}))
+    Ok(json!({"id":row.get::<_,String>(0)?,"decision_id":row.get::<_,String>(1)?,"review_revision":row.get::<_,i64>(2)?,"summary":content,"content":content,"labels":parse_sql_json(row.get::<_,String>(4)?)?,"task_family":row.get::<_,Option<String>>(5)?,"language":row.get::<_,Option<String>>(6)?,"applicability":row.get::<_,String>(7)?,"content_hash":row.get::<_,String>(8)?,"active":row.get::<_,bool>(9)?,"deleted_at":row.get::<_,Option<i64>>(10)?,"created_at":row.get::<_,i64>(11)?,"applicability_reason":row.get::<_,Option<String>>(12)?,"validation_assignment_event_id":row.get::<_,Option<String>>(13)?,"validation_context":optional_sql_json(row.get::<_,Option<String>>(14)?)?,"verification_status":row.get::<_,String>(15)?,"last_validated_at":row.get::<_,Option<i64>>(16)?,"task_lineage":row.get::<_,Option<String>>(17)?}))
 }
 
 fn version_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
-    Ok(json!({"id":row.get::<_,String>(0)?,"parent_id":row.get::<_,Option<String>>(1)?,"status":row.get::<_,String>(2)?,"configuration":parse_sql_json(row.get::<_,String>(3)?)?,"evaluation":optional_sql_json(row.get::<_,Option<String>>(4)?)?,"evaluation_status":row.get::<_,String>(5)?,"invalidated":row.get::<_,bool>(6)?,"invalidation_reason":row.get::<_,Option<String>>(7)?,"created_at":row.get::<_,i64>(8)?,"activated_at":row.get::<_,Option<i64>>(9)?,"case_count":row.get::<_,i64>(10)?}))
+    let evaluation=optional_sql_json(row.get::<_,Option<String>>(4)?)?;
+    let evaluation_status=row.get::<_,String>(5)?;
+    let invalidated=row.get::<_,bool>(6)?;
+    let activation_eligible=evaluation_status=="passed"&&!invalidated&&evaluation_report_compatible(&evaluation);
+    Ok(json!({"id":row.get::<_,String>(0)?,"parent_id":row.get::<_,Option<String>>(1)?,"status":row.get::<_,String>(2)?,"configuration":parse_sql_json(row.get::<_,String>(3)?)?,"evaluation":evaluation,"evaluation_status":evaluation_status,"activation_eligible":activation_eligible,"invalidated":invalidated,"invalidation_reason":row.get::<_,Option<String>>(7)?,"created_at":row.get::<_,i64>(8)?,"activated_at":row.get::<_,Option<i64>>(9)?,"case_count":row.get::<_,i64>(10)?}))
 }
 
 fn job_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
@@ -1398,11 +1752,19 @@ fn allowed(map: &Map<String,Value>, fields: &[&str]) -> Result<()> { if let Some
 fn required_string<'a>(map: &'a Map<String,Value>, key: &str, max: usize) -> Result<&'a str> { let value=map.get(key).and_then(Value::as_str).ok_or_else(||anyhow!("invalid: {key} must be a string"))?; if value.is_empty()||value.len()>max { bail!("invalid: {key} length"); } Ok(value) }
 fn required_string_value<'a>(value:&'a Value,key:&str,max:usize)->Result<&'a str>{let value=value.as_str().ok_or_else(||anyhow!("invalid: {key} must be a string"))?;if value.is_empty()||value.len()>max{bail!("invalid: {key} length");}Ok(value)}
 fn optional_string<'a>(map: &'a Map<String,Value>, key: &str, max: usize) -> Result<Option<&'a str>> { match map.get(key) { None|Some(Value::Null)=>Ok(None), Some(Value::String(v)) if !v.is_empty()&&v.len()<=max=>Ok(Some(v)), _=>bail!("invalid: {key} must be a non-empty string or null") } }
+pub fn canonical_task_family(value:&str)->Result<String>{let value=value.trim().to_ascii_lowercase();if value.is_empty()||value.len()>64||!value.bytes().all(|byte|byte.is_ascii_lowercase()||byte.is_ascii_digit()||byte==b'-')||value.starts_with('-')||value.ends_with('-')||value.contains("--"){bail!("invalid: task_family must be a canonical slug");}Ok(if value=="docs"{"documentation".into()}else{value})}
+pub fn validate_task_lineage(value:&str)->Result<String>{let value=value.trim();if value.is_empty()||value.len()>128||!value.bytes().all(|byte|byte.is_ascii_alphanumeric()||matches!(byte,b'-'|b'_'|b'.'|b':'|b'/')){bail!("invalid: task_lineage must be a bounded provenance identifier");}Ok(value.to_string())}
+fn evaluation_report_compatible(report:&Value)->bool{report["evaluator_identity"]==EVALUATOR_IDENTITY&&report["retrieval_policy_version"]==RETRIEVAL_POLICY_VERSION&&report["candidate_memory_exposure"].as_u64().unwrap_or(0)>0}
 fn require_bool(value: &Value,key:&str)->Result<bool>{value.as_bool().ok_or_else(||anyhow!("invalid: {key} must be boolean"))}
 fn require_i64(value: &Value,key:&str)->Result<i64>{value.as_i64().ok_or_else(||anyhow!("invalid: {key} must be an integer"))}
 fn id_param(value:&Value)->Result<&str>{required_string(object(value,"id parameter")?,"id",128)}
 fn bounded_limit(value:Option<&Value>,default:i64,max:i64)->Result<i64>{let limit=value.map(|v|require_i64(v,"limit")).transpose()?.unwrap_or(default);if !(1..=max).contains(&limit){bail!("invalid: limit out of range");}Ok(limit)}
 fn nonnegative(value:Option<&Value>,default:i64,key:&str)->Result<i64>{let n=value.map(|v|require_i64(v,key)).transpose()?.unwrap_or(default);if n<0{bail!("invalid: {key} must be nonnegative");}Ok(n)}
+fn created_bounds(map:&Map<String,Value>)->Result<(Option<i64>,Option<i64>)>{let after=map.get("created_after").map(|value|require_i64(value,"created_after")).transpose()?;let before=map.get("created_before").map(|value|require_i64(value,"created_before")).transpose()?;if after.is_some_and(|value|value<0)||before.is_some_and(|value|value<0){bail!("invalid: created time filters must be nonnegative UTC epoch seconds");}if matches!((after,before),(Some(after),Some(before)) if after>before){bail!("invalid: created_after must not exceed created_before");}Ok((after,before))}
+fn in_created_range(created_at:i64,after:Option<i64>,before:Option<i64>)->bool{after.is_none_or(|after|created_at>=after)&&before.is_none_or(|before|created_at<=before)}
+fn manifest_created_scope(connection:&Connection,payload:&Value,after:Option<i64>,before:Option<i64>)->Result<(bool,bool)>{let Some(segments)=payload.get("segments").and_then(Value::as_array) else{return Ok((false,false));};if segments.is_empty(){return Ok((false,false));}let mut any=false;let mut all=true;for segment in segments {let Some(id)=segment.get("decision_id").and_then(Value::as_str) else{return Ok((false,false));};let created_at=connection.query_row("SELECT created_at FROM decisions WHERE id=?1 AND deleted_at IS NULL",[id],|row|row.get::<_,i64>(0)).optional()?;let included=created_at.is_some_and(|created_at|in_created_range(created_at,after,before));any|=included;all&=included;}Ok((any,all))}
+fn manifest_collides(connection:&Connection,left:&Value,right:&Value)->Result<bool>{if left.get("run_id").and_then(Value::as_str)==right.get("run_id").and_then(Value::as_str)||left.get("host_root_ref").and_then(Value::as_str)==right.get("host_root_ref").and_then(Value::as_str){return Ok(true);}let owners=|payload:&Value|payload.get("segments").and_then(Value::as_array).into_iter().flatten().filter_map(|segment|Some((segment.get("decision_id")?.as_str()?.to_string(),segment.get("attempt_ref")?.as_str()?.to_string()))).collect::<HashSet<_>>();if !owners(left).is_disjoint(&owners(right)){return Ok(true);}Ok(!manifest_streams(connection,left)?.is_disjoint(&manifest_streams(connection,right)?))}
+fn manifest_streams(connection:&Connection,payload:&Value)->Result<HashSet<String>>{let mut streams=HashSet::new();for event_id in payload.get("segments").and_then(Value::as_array).into_iter().flatten().filter_map(|segment|segment.get("usage_event_id").and_then(Value::as_str)){let stored=connection.query_row("SELECT payload_json FROM feedback_events WHERE event_id=?1",[event_id],|row|row.get::<_,String>(0)).optional()?;if let Some(stream)=stored.as_deref().map(parse_json).transpose()?.and_then(|payload|payload.get("usage_stream_id").and_then(Value::as_str).map(str::to_string)){streams.insert(stream);}}Ok(streams)}
 fn string_array(value:&Value)->Result<Vec<String>>{value.as_array().ok_or_else(||anyhow!("invalid: expected string array"))?.iter().map(|v|v.as_str().map(str::to_string).ok_or_else(||anyhow!("invalid: array items must be strings"))).collect()}
 fn validate_evidence_refs(value:&Value)->Result<Vec<String>>{let refs=string_array(value)?;let mut unique=HashSet::new();if refs.iter().any(|reference|reference.is_empty()||!unique.insert(reference)){bail!("invalid: evidence_refs must contain unique non-empty strings");}Ok(refs)}
 fn validate_observed_at(value:&str)->Result<()>{let pattern=regex::Regex::new(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$").expect("static RFC3339 regex");if !pattern.is_match(value){bail!("invalid: observed_at must be RFC3339 date-time");}Ok(())}
@@ -1792,12 +2154,24 @@ mod tests {
         let case_id=review["case_id"].as_str().unwrap();
         store.call("versions/create",json!({"id":"v1","case_ids":[case_id],"configuration":{}})).await.unwrap();
         assert!(store.call("versions/activate",json!({"id":"v1"})).await.unwrap_err().to_string().starts_with("invalid:"));
-        store.call("versions/report",json!({"id":"v1","report":{"passed":true,"sample_count":10}})).await.unwrap();
+        store.call("versions/report",json!({"id":"v1","report":{"passed":true,"sample_count":10,"candidate_memory_exposure":1,"evaluator_identity":EVALUATOR_IDENTITY,"retrieval_policy_version":RETRIEVAL_POLICY_VERSION}})).await.unwrap();
+        assert_eq!(store.call("versions/get",json!({"id":"v1"})).await.unwrap()["activation_eligible"],true);
         store.call("versions/activate",json!({"id":"v1"})).await.unwrap();
         store.call("decisions/begin",json!({"request_id":"r2","id":"d2","request":{"state":"readme cleanup"}})).await.unwrap();
         let review2=store.call("reviews/create",json!({"id":"d2","expected_revision":0,"status":"confirmed","labels":{"complexity":"low","risk":"low","certainty":"clear"},"reason":"confirmed"})).await.unwrap();
+        store.call("versions/create",json!({"id":"stale","case_ids":[review2["case_id"]],"configuration":{}})).await.unwrap();
+        store.call("versions/report",json!({"id":"stale","report":{"passed":true,"sample_count":16}})).await.unwrap();
+        assert_eq!(store.call("versions/get",json!({"id":"stale"})).await.unwrap()["activation_eligible"],false);
+        assert!(store.call("versions/activate",json!({"id":"stale"})).await.unwrap_err().to_string().contains("incompatible with the current retrieval policy"));
+        store.call("versions/create",json!({"id":"failed","case_ids":[review2["case_id"]],"configuration":{}})).await.unwrap();
+        store.call("versions/report",json!({"id":"failed","report":{"passed":false,"candidate_memory_exposure":1,"evaluator_identity":EVALUATOR_IDENTITY,"retrieval_policy_version":RETRIEVAL_POLICY_VERSION}})).await.unwrap();
+        assert_eq!(store.call("versions/get",json!({"id":"failed"})).await.unwrap()["activation_eligible"],false);
         store.call("versions/create",json!({"id":"never-activated","case_ids":[review2["case_id"]],"configuration":{}})).await.unwrap();
-        store.call("versions/report",json!({"id":"never-activated","report":{"passed":true}})).await.unwrap();
+        store.call("versions/report",json!({"id":"never-activated","report":{"passed":true,"candidate_memory_exposure":1,"evaluator_identity":EVALUATOR_IDENTITY,"retrieval_policy_version":RETRIEVAL_POLICY_VERSION}})).await.unwrap();
+        let versions=store.call("versions/list",json!({})).await.unwrap();
+        assert_eq!(versions["items"].as_array().unwrap().iter().find(|version|version["id"]=="never-activated").unwrap()["activation_eligible"],true);
+        assert_eq!(versions["items"].as_array().unwrap().iter().find(|version|version["id"]=="stale").unwrap()["activation_eligible"],false);
+        assert_eq!(versions["items"].as_array().unwrap().iter().find(|version|version["id"]=="failed").unwrap()["activation_eligible"],false);
         store.call("cases/delete",json!({"id":case_id})).await.unwrap();
         let settings=store.call("settings/get",json!({})).await.unwrap();
         assert!(settings["active_memory_version"].is_null());
@@ -1811,7 +2185,7 @@ mod tests {
         store.call("decisions/begin",json!({"request_id":"r","id":"d","request":{"state":"migration"}})).await.unwrap();
         let first=store.call("reviews/create",json!({"id":"d","expected_revision":0,"status":"confirmed","labels":{"complexity":"medium","risk":"medium","certainty":"clear"},"reason":"first"})).await.unwrap();
         store.call("versions/create",json!({"id":"v","case_ids":[first["case_id"]],"configuration":{}})).await.unwrap();
-        store.call("versions/report",json!({"id":"v","report":{"passed":true}})).await.unwrap();
+        store.call("versions/report",json!({"id":"v","report":{"passed":true,"candidate_memory_exposure":1,"evaluator_identity":EVALUATOR_IDENTITY,"retrieval_policy_version":RETRIEVAL_POLICY_VERSION}})).await.unwrap();
         store.call("versions/activate",json!({"id":"v"})).await.unwrap();
         let corrected=store.call("reviews/create",json!({"id":"d","expected_revision":1,"status":"corrected","labels":{"complexity":"high","risk":"high","certainty":"clear"},"reason":"corrected"})).await.unwrap();
         let cases=store.call("cases/list",json!({"include_deleted":true})).await.unwrap();
@@ -1832,15 +2206,54 @@ mod tests {
 
     #[tokio::test]
     async fn candidate_evaluation_retrieval_uses_frozen_fts_cases_and_exclusions() {
-        let (_root,store)=recorded_store().await;
+        let (root,store)=recorded_store().await;
         store.call("decisions/begin",json!({"request_id":"r","id":"d","request":{"state":"数据库迁移需要回滚计划"}})).await.unwrap();
-        let review=store.call("reviews/create",json!({"id":"d","expected_revision":0,"status":"confirmed","labels":{"complexity":"high","risk":"high","certainty":"clear"},"task_family":"migration","language":"zh","reason":"confirmed"})).await.unwrap();
+        let review=store.call("reviews/create",json!({"id":"d","expected_revision":0,"status":"confirmed","labels":{"complexity":"high","risk":"high","certainty":"clear"},"task_family":"migration","task_lineage":"migration-reviewed-1","language":"zh","reason":"confirmed"})).await.unwrap();
         let case_id=review["case_id"].as_str().unwrap();
         store.call("versions/create",json!({"id":"candidate","case_ids":[case_id],"configuration":{}})).await.unwrap();
-        let found=store.call("memory/retrieve",json!({"query":"回滚 风险","version":"candidate","evaluation":true,"configuration":{"task_family":"migration","language":"zh"}})).await.unwrap();
+        let found=store.call("memory/retrieve",json!({"query":"回滚 风险","version":"candidate","evaluation":true,"configuration":{"task_family":"migration","task_lineage":"migration-holdout-1","language":"zh"}})).await.unwrap();
         assert_eq!(found["cases"][0]["summary"],"数据库迁移需要回滚计划");
-        let excluded=store.call("memory/retrieve",json!({"query":"回滚 风险","version":"candidate","evaluation":true,"exclude_task_families":["MIGRATION"],"configuration":{"language":"zh"}})).await.unwrap();
-        assert_eq!(excluded["cases"].as_array().unwrap().len(),0);
+        let same_lineage=store.call("memory/retrieve",json!({"query":"回滚 风险","version":"candidate","evaluation":true,"configuration":{"task_family":"migration","task_lineage":"migration-reviewed-1","language":"zh"}})).await.unwrap();
+        assert_eq!(same_lineage["cases"].as_array().unwrap().len(),0);
+        let cross_family=store.call("memory/retrieve",json!({"query":"回滚 风险","version":"candidate","evaluation":true,"configuration":{"task_family":"authorization","task_lineage":"authorization-holdout-1","language":"zh"}})).await.unwrap();
+        assert_eq!(cross_family["cases"].as_array().unwrap().len(),0);
+        let cross_language=store.call("memory/retrieve",json!({"query":"回滚 风险","version":"candidate","evaluation":true,"configuration":{"task_family":"migration","task_lineage":"migration-holdout-1","language":"en"}})).await.unwrap();
+        assert_eq!(cross_language["cases"].as_array().unwrap().len(),0);
+        let near_duplicate=store.call("memory/retrieve",json!({"query":"数据库迁移需要回滚计划","version":"candidate","evaluation":true,"configuration":{"task_family":"migration","task_lineage":"migration-holdout-2","language":"zh"}})).await.unwrap();
+        assert_eq!(near_duplicate["cases"].as_array().unwrap().len(),0);
+        assert_eq!(canonical_task_family("Docs").unwrap(),"documentation");
+        Connection::open(root.path().join("laya.sqlite3")).unwrap().execute("UPDATE cases SET task_family='docs' WHERE id=?1",[case_id]).unwrap();
+        let alias=store.call("memory/retrieve",json!({"query":"回滚 风险","version":"candidate","evaluation":true,"configuration":{"task_family":"documentation","task_lineage":"migration-holdout-3","language":"zh"}})).await.unwrap();
+        assert_eq!(alias["cases"][0]["id"],case_id);
+    }
+
+    #[tokio::test]
+    async fn evaluation_rejects_unknown_case_lineage_as_independent() {
+        let (_root,store)=recorded_store().await;
+        store.call("decisions/begin",json!({"request_id":"legacy","id":"legacy","request":{"state":"rollback migration safety"}})).await.unwrap();
+        let review=store.call("reviews/create",json!({"id":"legacy","expected_revision":0,"status":"confirmed","labels":{"complexity":"high","risk":"high","certainty":"clear"},"task_family":"migration","language":"en","reason":"confirmed"})).await.unwrap();
+        store.call("versions/create",json!({"id":"candidate","case_ids":[review["case_id"]],"configuration":{}})).await.unwrap();
+        let result=store.call("memory/retrieve",json!({"query":"rollback safety","version":"candidate","evaluation":true,"configuration":{"task_family":"migration","task_lineage":"migration-holdout","language":"en"}})).await.unwrap();
+        assert_eq!(result["cases"].as_array().unwrap().len(),0);
+        assert_eq!(result["reason"],"unknown_lineage");
+    }
+
+    #[tokio::test]
+    async fn routing_scope_is_filtered_before_fts_limit() {
+        let (_root,store)=recorded_store().await;
+        let mut case_ids=Vec::new();
+        for index in 0..128 {
+            let id=format!("docs-{index:03}");
+            store.call("decisions/begin",json!({"request_id":id,"id":id,"request":{"state":"shared routing token documentation note"}})).await.unwrap();
+            let review=store.call("reviews/create",json!({"id":id,"expected_revision":0,"status":"confirmed","labels":{"complexity":"low","risk":"low","certainty":"clear"},"task_family":"documentation","task_lineage":format!("docs-{index}"),"language":"en","reason":"confirmed"})).await.unwrap();
+            case_ids.push(review["case_id"].clone());
+        }
+        store.call("decisions/begin",json!({"request_id":"auth-target","id":"auth-target","request":{"state":"shared routing token authorization boundary audit"}})).await.unwrap();
+        let target=store.call("reviews/create",json!({"id":"auth-target","expected_revision":0,"status":"confirmed","labels":{"complexity":"high","risk":"high","certainty":"clear"},"task_family":"authorization","task_lineage":"auth-reviewed","language":"en","reason":"confirmed"})).await.unwrap();
+        case_ids.push(target["case_id"].clone());
+        store.call("versions/create",json!({"id":"scoped","case_ids":case_ids,"configuration":{}})).await.unwrap();
+        let result=store.call("memory/retrieve",json!({"query":"shared routing token","version":"scoped","evaluation":true,"configuration":{"task_family":"authorization","task_lineage":"auth-holdout","language":"en"}})).await.unwrap();
+        assert_eq!(result["cases"][0]["id"],target["case_id"]);
     }
 
     #[tokio::test]
@@ -1853,7 +2266,7 @@ mod tests {
         store.call("feedback",assignment).await.unwrap();
         let scored=json!({"protocol_version":1,"event_id":"score-complete","decision_id":"config","attempt_ref":"attempt-complete","kind":"review","source":{"host":"codex","role":"worker","actor_type":"agent"},"payload":{"disposition":"approved","scores":[score("initial",1,None)]}});
         store.call("feedback",scored).await.unwrap();
-        let reviewed=store.call("reviews/create",json!({"id":"config","expected_revision":0,"status":"confirmed","labels":{"complexity":"high","risk":"high","certainty":"clear"},"task_family":"migration","language":"en","applicability":"configuration-dependent","applicability_reason":"validated on recorded attempt","validation_assignment_event_id":"assignment-complete","reason":"confirmed"})).await.unwrap();
+        let reviewed=store.call("reviews/create",json!({"id":"config","expected_revision":0,"status":"confirmed","labels":{"complexity":"high","risk":"high","certainty":"clear"},"task_family":"migration","task_lineage":"config-reviewed","language":"en","applicability":"configuration-dependent","applicability_reason":"validated on recorded attempt","validation_assignment_event_id":"assignment-complete","reason":"confirmed"})).await.unwrap();
         let case_id=reviewed["case_id"].as_str().unwrap();
         let cases=store.call("cases/list",json!({})).await.unwrap();
         let case=&cases["items"][0];
@@ -1867,15 +2280,15 @@ mod tests {
         assert_eq!(detail["reviews"][0]["applicability"],"configuration-dependent");
         assert_eq!(detail["reviews"][0]["validation_assignment_event_id"],"assignment-complete");
         store.call("versions/create",json!({"id":"config-version","case_ids":[case_id],"configuration":{}})).await.unwrap();
-        let missing=store.call("memory/retrieve",json!({"query":"rollback safety","version":"config-version","evaluation":true,"configuration":{"task_family":"migration","language":"en"}})).await.unwrap();
+        let missing=store.call("memory/retrieve",json!({"query":"rollback safety","version":"config-version","evaluation":true,"configuration":{"task_family":"migration","task_lineage":"config-holdout","language":"en"}})).await.unwrap();
         assert_eq!(missing["reason"],"applicability_unknown");
         assert_eq!(missing["applicability_exclusions"][0],json!({"case_id":case_id,"status":"unknown","reason":"missing_retrieval_validation_context"}));
         let mut mismatch=case["validation_context"].clone();
         mismatch["effective"]["model_revision"]=json!("revision-b");
-        let stale=store.call("memory/retrieve",json!({"query":"rollback safety","version":"config-version","evaluation":true,"configuration":{"task_family":"migration","language":"en","validation_context":mismatch}})).await.unwrap();
+        let stale=store.call("memory/retrieve",json!({"query":"rollback safety","version":"config-version","evaluation":true,"configuration":{"task_family":"migration","task_lineage":"config-holdout","language":"en","validation_context":mismatch}})).await.unwrap();
         assert_eq!(stale["reason"],"needs_revalidation");
         assert_eq!(stale["applicability_exclusions"][0]["status"],"needs_revalidation");
-        let matched=store.call("memory/retrieve",json!({"query":"rollback safety","version":"config-version","evaluation":true,"configuration":{"task_family":"migration","language":"en","validation_context":case["validation_context"].clone()}})).await.unwrap();
+        let matched=store.call("memory/retrieve",json!({"query":"rollback safety","version":"config-version","evaluation":true,"configuration":{"task_family":"migration","task_lineage":"config-holdout","language":"en","validation_context":case["validation_context"].clone()}})).await.unwrap();
         assert_eq!(matched["reason"],"matched");
         assert_eq!(matched["cases"][0]["id"],case_id);
     }
@@ -1917,19 +2330,32 @@ mod tests {
             connection.pragma_update(None,"user_version",2).unwrap();
             connection.execute("INSERT INTO decisions(id,request_id,request_json,recording_status,created_at) VALUES('task','task','{\"state\":\"task\"}','stored',1)",[]).unwrap();
             connection.execute("INSERT INTO reviews(decision_id,revision,status,labels_json,reason,actor_json,created_at) VALUES('task',1,'confirmed','{}','legacy','null',1)",[]).unwrap();
-            connection.execute("INSERT INTO cases(id,decision_id,review_revision,content_json,labels_json,applicability,content_hash,created_at) VALUES('task:1','task',1,'\"task\"','{}','task-fact','task',1)",[]).unwrap();
+            connection.execute("INSERT INTO cases(id,decision_id,review_revision,content_json,labels_json,task_family,language,applicability,content_hash,created_at) VALUES('task:1','task',1,'\"documentation task\"','{}','docs','en','task-fact','task',1)",[]).unwrap();
+            connection.execute("INSERT INTO cases_fts(case_id,content) VALUES('task:1','documentation task')",[]).unwrap();
             connection.execute("INSERT INTO decisions(id,request_id,request_json,recording_status,created_at) VALUES('config','config','{\"state\":\"config\"}','stored',1)",[]).unwrap();
             connection.execute("INSERT INTO reviews(decision_id,revision,status,labels_json,reason,actor_json,created_at) VALUES('config',1,'confirmed','{}','legacy','null',1)",[]).unwrap();
             connection.execute("INSERT INTO cases(id,decision_id,review_revision,content_json,labels_json,applicability,content_hash,created_at) VALUES('config:1','config',1,'\"config\"','{}','configuration-dependent','config',1)",[]).unwrap();
+            connection.execute("INSERT INTO memory_versions(id,status,configuration_json,evaluation_json,evaluation_status,created_at) VALUES('legacy-active','active','{}','{\"passed\":true,\"sample_count\":16}','passed',1)",[]).unwrap();
+            connection.execute("INSERT INTO memory_version_cases(version_id,case_id,case_hash) VALUES('legacy-active','task:1','task')",[]).unwrap();
+            connection.execute("UPDATE settings SET active_memory_version='legacy-active' WHERE singleton=1",[]).unwrap();
         }
         let store=Store::open(root.path()).unwrap();
-        assert_eq!(store.call("status",json!({})).await.unwrap()["schema_version"],3);
+        assert_eq!(store.call("status",json!({})).await.unwrap()["schema_version"],4);
         let cases=store.call("cases/list",json!({})).await.unwrap();
         let task=cases["items"].as_array().unwrap().iter().find(|case|case["id"]=="task:1").unwrap();
         let config=cases["items"].as_array().unwrap().iter().find(|case|case["id"]=="config:1").unwrap();
         assert_eq!(task["verification_status"],"verified");
+        assert!(task["task_lineage"].is_null());
         assert_eq!(config["verification_status"],"unknown");
+        assert!(config["task_lineage"].is_null());
         assert_eq!(config["applicability_reason"],"validation_unknown:legacy_missing_validation_metadata");
+        let online=store.call("memory/retrieve",json!({"query":"documentation task","configuration":{"task_family":"documentation","language":"en"}})).await.unwrap();
+        assert_eq!(online["reason"],"incompatible_evaluation_policy");
+        let evaluation=store.call("memory/retrieve",json!({"query":"documentation task","version":"legacy-active","evaluation":true,"configuration":{"task_family":"documentation","task_lineage":"holdout","language":"en"}})).await.unwrap();
+        assert_eq!(evaluation["reason"],"incompatible_evaluation_policy");
+        let legacy=store.call("versions/get",json!({"id":"legacy-active"})).await.unwrap();
+        assert_eq!(legacy["status"],"active");
+        assert_eq!(legacy["evaluation"]["sample_count"],16);
         assert!(root.path().join("backups").read_dir().unwrap().next().is_some());
     }
 

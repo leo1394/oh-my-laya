@@ -22,10 +22,12 @@ FIXTURE = ROOT / "tests/fixtures/workbench_worker.py"
 
 
 def main():
+    if not BINARY.is_file():
+        raise FileNotFoundError(f"LAYA_TEST_BINARY must name an existing regular file: {BINARY}")
     FIXTURE.chmod(0o755)
     with tempfile.TemporaryDirectory(prefix="laya-smoke-", dir="/private/tmp") as directory:
         data = Path(directory)
-        env = {**os.environ, "LAYA_WORKBENCH_DIR": str(data), "LAYA_PYTHON": str(FIXTURE), "LAYA_IDLE_SECONDS": "1"}
+        env = {**os.environ, "LAYA_WORKBENCH_DIR": str(data), "LAYA_PORT": "0", "LAYA_PYTHON": str(FIXTURE), "LAYA_IDLE_SECONDS": "1"}
         service = subprocess.Popen([str(BINARY), "service"], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
         def rpc(method, params=None, request_id=None):
@@ -100,7 +102,7 @@ def main():
             except RuntimeError:
                 pass
             assert rpc("status")["worker"]["pid"] == 0
-            decision = rpc("predict", {"state": "Check a rollback migration", "advisor": {"models": []}}, "decision-smoke")
+            decision = rpc("predict", {"state": "Check a rollback migration", "advisor": {"models": [], "task_family": "migration", "task_lineage": "smoke-rollback-review"}}, "decision-smoke")
             assert decision["meta"]["recording_status"] == "stored", decision
             event = {"protocol_version": 1, "event_id": "first-score", "decision_id": "decision-smoke", "attempt_ref": "attempt-1",
                      "kind": "review", "source": {"host": "codex", "role": "reviewer", "actor_type": "agent"},
@@ -161,7 +163,7 @@ def main():
             detail = http("/api/v1/decisions/decision-smoke")
             assert len(detail["feedback"]) == 3
             assert detail["feedback"][0]["payload"]["scores"][0]["value"] == 0
-            review = http("/api/v1/decisions/decision-smoke/reviews", {"expected_revision": 0, "status": "corrected", "labels": {"complexity": "high", "risk": "high", "certainty": "clear"}, "reason": "Rollback has data-loss consequences"})
+            review = http("/api/v1/decisions/decision-smoke/reviews", {"expected_revision": 0, "status": "corrected", "labels": {"complexity": "high", "risk": "high", "certainty": "clear"}, "task_family": "migration", "task_lineage": "smoke-rollback-review", "language": "en", "applicability": "task-fact", "reason": "Rollback has data-loss consequences"})
             version = http("/api/v1/memory-versions", {"case_ids": [review["case_id"]]})
             version_id = version.get("id") or version.get("version", {}).get("id")
             assert version_id, version
@@ -178,12 +180,18 @@ def main():
                     break
                 time.sleep(0.05)
             assert job["status"] == "completed", job
+            assert job["result"]["candidate_memory_exposure"] > 0, job
             assert job["result"]["passed"] is True, job
             http(f"/api/v1/memory-versions/{version_id}/activate", {})
             http("/api/v1/settings", {"memory_enabled": True}, "PATCH")
-            remembered = rpc("predict", {"state": "Check a rollback migration", "advisor": {"models": []}}, "with-memory")
+            remembered = rpc("predict", {"state": "Check a rollback migration for another service", "advisor": {"models": [], "task_family": "migration", "task_lineage": "smoke-rollback-reuse"}}, "with-memory")
             assert remembered["meta"]["memory_version"] == version_id, remembered
             assert review["case_id"] in remembered["meta"]["case_ids"], remembered
+            assert review["case_id"] in remembered["meta"]["worker_case_ids"], remembered
+            same_lineage = rpc("predict", {"state": "Check a rollback migration", "advisor": {"models": [], "task_family": "migration", "task_lineage": "smoke-rollback-review"}}, "same-lineage")
+            assert same_lineage["meta"]["case_ids"] == [], same_lineage
+            assert same_lineage["meta"]["worker_case_ids"] == [], same_lineage
+            http("/api/v1/decisions/same-lineage", method="DELETE")
             exported = http("/api/v1/jobs", {"kind": "export"})
             for _ in range(100):
                 exported = http(f"/api/v1/jobs/{exported['id']}")

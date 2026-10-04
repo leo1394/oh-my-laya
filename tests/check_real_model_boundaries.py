@@ -158,6 +158,7 @@ def main():
                 "HF_HUB_OFFLINE": "1",
                 "TRANSFORMERS_OFFLINE": "1",
                 "LAYA_WORKBENCH_DIR": str(workbench),
+                "LAYA_PORT": "0",
                 "LAYA_ADVISOR_CONFIG": str(disposable / "advisor.json"),
                 "LAYA_MODEL_LOCK_FD": str(lock_fd),
                 "PYTHONPATH": str(ROOT / "src"),

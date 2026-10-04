@@ -13,25 +13,77 @@ export function displayTime(value) {
   return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString()
 }
 
-export function decisionQuery(filters = {}, offset = 0) {
+function localDate(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null
+  const [year, month, day] = value.split('-').map(Number)
+  const date = new Date(year, month - 1, day)
+  if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) return null
+  return date
+}
+
+export function localDateKey(date) {
+  const pad = (value) => String(value).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+}
+
+export function presetDateRange(preset = 'last7', now = new Date()) {
+  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const start = new Date(end)
+  if (preset === 'last7') start.setDate(start.getDate() - 6)
+  else if (preset === 'last30') start.setDate(start.getDate() - 29)
+  else if (preset !== 'today') throw new Error('Unknown date preset.')
+  return { preset, start: localDateKey(start), end: localDateKey(end) }
+}
+
+export function refreshPresetRange(range, now = new Date()) {
+  if (!range || range.preset === 'custom') return range
+  const next = presetDateRange(range.preset, now)
+  return next.start === range.start && next.end === range.end ? range : next
+}
+
+export function dateRangeBounds(range) {
+  const start = localDate(range?.start)
+  const end = localDate(range?.end)
+  if (!start || !end) return { valid: false, error: 'Choose valid start and end dates.' }
+  if (start.getTime() > end.getTime()) return { valid: false, error: 'Start date must be on or before end date.' }
+  const nextDay = new Date(end.getFullYear(), end.getMonth(), end.getDate() + 1)
+  return {
+    valid: true,
+    created_after: Math.floor(start.getTime() / 1000),
+    created_before: Math.floor(nextDay.getTime() / 1000) - 1
+  }
+}
+
+export function rangeQuery(bounds) {
+  if (!bounds?.valid) throw new Error(bounds?.error || 'Choose a valid date range.')
+  return new URLSearchParams({ created_after: String(bounds.created_after), created_before: String(bounds.created_before) }).toString()
+}
+
+export function decisionQuery(filters = {}, offset = 0, bounds = null) {
   const query = new URLSearchParams({ limit: '50', offset: String(offset) })
   query.set('filter', filters.status || 'pending')
   if (filters.risk) query.set('risk', filters.risk)
   if (filters.source?.trim()) query.set('source', filters.source.trim())
-  for (const [input, output] of [['after', 'created_after'], ['before', 'created_before']]) {
-    if (!filters[input]) continue
-    const value = new Date(filters[input]).getTime()
-    if (!Number.isFinite(value)) throw new Error('Choose a valid date and time.')
-    query.set(output, String(Math.floor(value / 1000)))
-  }
-  if (query.has('created_after') && query.has('created_before') && Number(query.get('created_after')) > Number(query.get('created_before'))) {
-    throw new Error('Start time must be before end time.')
+  if (bounds) {
+    if (!bounds.valid) throw new Error(bounds.error)
+    query.set('created_after', String(bounds.created_after))
+    query.set('created_before', String(bounds.created_before))
   }
   return query.toString()
 }
 
 export function queueNeedsRefresh(changes) {
   return ['decision', 'review', 'feedback'].some((kind) => changes.includes(kind))
+}
+
+export function reviewScope(decision = {}, latestReview = {}) {
+  const advisor = decision.request?.advisor || {}
+  const field = (key) => Object.hasOwn(latestReview, key) ? latestReview[key] : (key === 'language' ? decision[key] : advisor[key] ?? decision[key])
+  return {
+    task_family: field('task_family') || 'general',
+    task_lineage: field('task_lineage') || '',
+    language: field('language') || (/\p{Script=Han}/u.test(JSON.stringify(decision.request?.state || '')) ? 'zh' : 'en')
+  }
 }
 
 export function reviewSignals(decision = {}) {
@@ -80,7 +132,7 @@ export function errorMessage(error) {
 }
 
 export function decisionTitle(decision) {
-  return decision?.summary || decision?.task_summary || decision?.task_ref || decision?.id || 'Untitled decision'
+  return decision?.summary || decision?.task_summary || decision?.task_ref || (typeof decision?.request?.state === 'string' ? decision.request.state : null) || decision?.id || 'Untitled decision'
 }
 
 export function itemId(item) {

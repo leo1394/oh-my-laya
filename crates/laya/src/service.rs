@@ -1,5 +1,5 @@
-use crate::{outbox::Outbox, protocol::{now, redact, Request}, runtime::{self, ServiceInfo}, store::Store, worker::Worker};
-use anyhow::{bail, Result};
+use crate::{outbox::Outbox, protocol::{now, redact, Request}, runtime::{self, ServiceInfo}, store::{canonical_task_family,validate_task_lineage,Store}, worker::Worker};
+use anyhow::{bail, Context, Result};
 use axum::{extract::{Path as UrlPath, Query, State}, http::{HeaderMap, StatusCode}, response::{IntoResponse, Response}, routing::{get, post}, Json, Router};
 use fs2::FileExt;
 use serde_json::{json, Value};
@@ -9,6 +9,21 @@ use crate::assets::serve as assets;
 
 pub fn worker_cases(memory: &Value) -> Value {
     json!(memory["cases"].as_array().into_iter().flatten().map(|case|json!({"id":case["id"],"summary":case["summary"].as_str().map(str::to_string).unwrap_or_else(||case["summary"].to_string()),"labels":case["labels"]})).collect::<Vec<_>>())
+}
+
+fn take_advisor_routing_scope(params:&mut Value)->Result<(Option<String>,Option<String>)> {
+    let Some(advisor)=params.get_mut("advisor").and_then(Value::as_object_mut) else {return Ok((None,None));};
+    let task_family=match advisor.remove("task_family") {
+        None|Some(Value::Null)=>None,
+        Some(Value::String(value))=>Some(canonical_task_family(&value)?),
+        Some(_)=>bail!("invalid: advisor.task_family must be a string"),
+    };
+    let task_lineage=match advisor.remove("task_lineage") {
+        None|Some(Value::Null)=>None,
+        Some(Value::String(value))=>Some(validate_task_lineage(&value)?),
+        Some(_)=>bail!("invalid: advisor.task_lineage must be a string"),
+    };
+    Ok((task_family,task_lineage))
 }
 
 async fn events(State(app): State<App>, Query(query): Query<HashMap<String,String>>, headers: HeaderMap) -> Response {
@@ -107,6 +122,8 @@ impl App {
         if self.stopping.load(Ordering::Acquire) {bail!("unavailable: service is stopping");}
         let advisor = request.params.get("advisor").filter(|v| !v.is_null()).is_some();
         if !advisor { return self.worker.call("predict",request.params.clone()).await; }
+        let mut params = request.params.clone();
+        let (task_family,task_lineage)=take_advisor_routing_scope(&mut params)?;
         let id = request.request_id.clone();
         let begin = match self.persist_snapshot("decisions/begin", json!({"id":id,"request_id":request.request_id,"request":request.params})).await {
             Ok(value)=>value,
@@ -126,19 +143,23 @@ impl App {
         };
         let settings = self.store.call("settings/get",json!({})).await.unwrap_or(json!({"memory_enabled":false}));
         let query = request.params["state"].as_str().map(str::to_string).unwrap_or_else(|| request.params["state"].to_string());
-        let memory = if settings["memory_enabled"] == true {
+        let memory = if settings["memory_enabled"] == true && task_family.is_some() {
             let language=if query.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)) {"zh"} else {"en"};
             // No verified execution configuration is known before model selection.
             // Preserve exclusion reasons in the snapshot, never infer identity from Laya's checkpoint.
-            self.store.call("memory/retrieve",json!({"query":query,"configuration":{"task_family":"general","language":language}})).await.unwrap_or(json!({"cases":[],"reason":"retrieval_failed"}))
-        } else { json!({"cases":[],"reason":"disabled"}) };
-        let mut params = request.params.clone();
+            self.store.call("memory/retrieve",json!({"query":query,"configuration":{"task_family":task_family,"task_lineage":task_lineage,"language":language}})).await.unwrap_or(json!({"cases":[],"reason":"retrieval_failed"}))
+        } else if settings["memory_enabled"] == true {json!({"cases":[],"reason":"missing_task_family_scope"})}
+        else { json!({"cases":[],"reason":"disabled"}) };
         params["memory_cases"] = worker_cases(&memory);
+        params["model_tiers"] = settings.get("model_tiers").cloned().unwrap_or(json!({}));
         let outcome = self.worker.call("predict",params).await;
         match outcome {
             Ok(mut result) => {
                 info=self.worker.call("info",json!({})).await.unwrap_or_else(|_|json!({"model":{"model_revision":null},"identity_error":"post-inference identity unavailable","rules_version":info["rules_version"]}));
                 let mut meta = result.get("meta").cloned().unwrap_or(json!({}));
+                // Retain worker-reported exposure separately from retrieval selection.
+                // A missing worker report stays unknown, never inferred from retrieval.
+                meta["worker_case_ids"] = meta.get("case_ids").cloned().unwrap_or(Value::Null);
                 meta["decision_id"] = json!(id);
                 meta["protocol_version"] = json!(1);
                 meta["recording_status"] = begin.get("recording_status").cloned().unwrap_or(json!("not_recorded"));
@@ -237,10 +258,16 @@ async fn api_get(State(app): State<App>, UrlPath(path): UrlPath<String>, Query(q
     }
     let params = if pieces.as_slice()==["decisions"] {
         match decisions_list_params(&query) {Ok(params)=>params,Err(error)=>return failure(error)}
+    } else if pieces.as_slice()==["overview"] {
+        match time_filter_params(&query,false) {Ok(params)=>params,Err(error)=>return failure(error)}
+    } else if pieces.as_slice()==["cases"] {
+        match time_filter_params(&query,true) {Ok(params)=>params,Err(error)=>return failure(error)}
     } else if let Some(id)=pieces.get(1) {json!({"id":id})} else {json!({"limit":query.get("limit").and_then(|s|s.parse::<u64>().ok()).unwrap_or(50),"offset":query.get("offset").and_then(|s|s.parse::<u64>().ok()).unwrap_or(0)})};
     let result = match pieces.as_slice() {
         ["status"] => app.status().await,
+        ["overview"] => app.store.call("overview/get",params).await,
         ["settings"] => app.store.call("settings/get",json!({})).await,
+        ["advisor-preferences"] => app.worker.call("preferences",json!({})).await,
         ["decisions"] => app.store.call("decisions/list",params).await,
         ["decisions",_] => app.store.call("decisions/get",params).await,
         ["cases"] => app.store.call("cases/list",params).await,
@@ -270,6 +297,20 @@ fn decisions_list_params(query:&HashMap<String,String>)->Result<Value> {
         if let Some(value)=query.get(key){filter.insert(key.into(),json!(value.parse::<i64>().map_err(|_|anyhow::anyhow!("invalid: {key} must be UTC epoch seconds"))?));}
     }
     Ok(json!({"limit":limit,"offset":offset,"filter":filter}))
+}
+
+fn time_filter_params(query:&HashMap<String,String>,pagination:bool)->Result<Value> {
+    if let Some(key)=query.keys().find(|key|!["created_after","created_before"].contains(&key.as_str())&&(!pagination||!["limit","offset"].contains(&key.as_str()))){bail!("invalid: unknown query filter {key}");}
+    let mut params=serde_json::Map::new();
+    for key in ["created_after","created_before"] {
+        if let Some(value)=query.get(key){params.insert(key.into(),json!(value.parse::<i64>().map_err(|_|anyhow::anyhow!("invalid: {key} must be UTC epoch seconds"))?));}
+    }
+    if pagination {
+        let limit=query.get("limit").map(|value|value.parse::<i64>().map_err(|_|anyhow::anyhow!("invalid: limit must be an integer"))).transpose()?.unwrap_or(50);
+        let offset=query.get("offset").map(|value|value.parse::<i64>().map_err(|_|anyhow::anyhow!("invalid: offset must be an integer"))).transpose()?.unwrap_or(0);
+        params.insert("limit".into(),json!(limit));params.insert("offset".into(),json!(offset));
+    }
+    Ok(Value::Object(params))
 }
 
 async fn download_export(app:&App,id:&str)->Result<Response> {
@@ -404,6 +445,10 @@ fn clear_exports(root:&std::path::Path)->Result<()> {
 }
 
 pub async fn run(root: PathBuf) -> Result<()> {
+    run_with_port(root,runtime::configured_port()?).await
+}
+
+pub async fn run_with_port(root:PathBuf,port:u16)->Result<()> {
     runtime::private_dir(&root)?;
     let lock=std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(root.join("service.lock"))?;
     if lock.try_lock_exclusive().is_err() { return Ok(()); }
@@ -411,7 +456,8 @@ pub async fn run(root: PathBuf) -> Result<()> {
     if socket.exists() { std::fs::remove_file(&socket)?; }
     let unix=UnixListener::bind(&socket)?;
     std::fs::set_permissions(&socket,std::fs::Permissions::from_mode(0o600))?;
-    let tcp=TcpListener::bind("127.0.0.1:0").await?;
+    let tcp=TcpListener::bind((std::net::Ipv4Addr::LOCALHOST,port)).await
+        .with_context(||format!("cannot listen on 127.0.0.1:{port}; use laya dashboard --port <free-port> if this port is occupied"))?;
     let info=ServiceInfo {pid:std::process::id(),instance:uuid::Uuid::new_v4().to_string(),port:tcp.local_addr()?.port(),protocol_version:1};
     let store=match Store::open(&root) {
         Ok(store)=>store,
@@ -522,6 +568,18 @@ mod tests {
         assert_eq!(worker_cases(&memory),json!([{"id":"task-fact","summary":"Keep rollback evidence","labels":{"risk":"high"}}]));
     }
 
+    #[test]
+    fn advisor_routing_scope_is_validated_canonicalized_and_removed_from_worker_input() {
+        let mut params=json!({"state":"Update the README","advisor":{"task_family":"docs","task_lineage":"repo:readme/typo-1","models":[]}});
+        assert_eq!(take_advisor_routing_scope(&mut params).unwrap(),(Some("documentation".into()),Some("repo:readme/typo-1".into())));
+        assert!(params["advisor"].get("task_family").is_none());
+        assert!(params["advisor"].get("task_lineage").is_none());
+        let mut invalid=json!({"state":"task","advisor":{"task_family":"Authorization Boundary","models":[]}});
+        assert!(take_advisor_routing_scope(&mut invalid).unwrap_err().to_string().starts_with("invalid:"));
+        let mut missing=json!({"state":"task","advisor":{"models":[]}});
+        assert_eq!(take_advisor_routing_scope(&mut missing).unwrap(),(None,None));
+    }
+
     fn app(root:&std::path::Path)->App {
         App {store:Store::open(root).unwrap(),worker:Worker::start("nonexistent-python".into(),Duration::from_secs(1),root.join("model.lock")),root:root.into(),info:ServiceInfo{pid:1,instance:"test".into(),port:34567,protocol_version:1},privacy:Arc::new(Mutex::new(())),maintenance:Arc::new(RwLock::new(())),job_guard:Arc::new(Mutex::new(())),changed:Arc::new(Notify::new()),shutdown:Arc::new(Notify::new()),stopping:Arc::new(AtomicBool::new(false)),sessions:Arc::new(Mutex::new(HashMap::new())),pairing:Arc::new(Mutex::new(HashMap::new()))}
     }
@@ -565,5 +623,16 @@ mod tests {
         assert_eq!(params["filter"],json!({"status":"pending","risk":"high","source":"reviewer","created_after":10,"created_before":20}));
         assert!(decisions_list_params(&HashMap::from([("created_after".into(),"yesterday".into())])).unwrap_err().to_string().starts_with("invalid:"));
         assert!(decisions_list_params(&HashMap::from([("where".into(),"1=1".into())])).unwrap_err().to_string().starts_with("invalid:"));
+    }
+
+    #[test]
+    fn overview_and_case_time_queries_are_strictly_parsed() {
+        let overview=time_filter_params(&HashMap::from([("created_after".into(),"10".into()),("created_before".into(),"20".into())]),false).unwrap();
+        assert_eq!(overview,json!({"created_after":10,"created_before":20}));
+        let cases=time_filter_params(&HashMap::from([("created_after".into(),"10".into()),("limit".into(),"5".into()),("offset".into(),"2".into())]),true).unwrap();
+        assert_eq!(cases,json!({"created_after":10,"limit":5,"offset":2}));
+        assert!(time_filter_params(&HashMap::from([("created_after".into(),"yesterday".into())]),false).unwrap_err().to_string().starts_with("invalid:"));
+        assert!(time_filter_params(&HashMap::from([("unknown".into(),"1".into())]),false).unwrap_err().to_string().starts_with("invalid:"));
+        assert!(time_filter_params(&HashMap::from([("limit".into(),"1".into())]),false).unwrap_err().to_string().starts_with("invalid:"));
     }
 }

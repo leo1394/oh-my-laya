@@ -140,7 +140,7 @@ def _model_info():
 
 
 def _predict(params):
-    allowed = {"state", "questions", "advisor", "memory_cases"}
+    allowed = {"state", "questions", "advisor", "memory_cases", "model_tiers"}
     unknown = set(params) - allowed
     if unknown:
         raise ValueError("predict contains unknown parameters")
@@ -158,6 +158,7 @@ def _predict(params):
             memory_cases=params.get(
                 "memory_cases", [] if params.get("advisor") is not None else None
             ),
+            model_tiers=params.get("model_tiers"),
         )
     finally:
         if loading and server._agent is not None:

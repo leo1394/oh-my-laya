@@ -36,6 +36,15 @@ impl Outbox {
         let mut db = self.connection()?;
         let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         if tx.query_row("SELECT 1 FROM deleted_decisions WHERE id=?", [decision], |_| Ok(())).optional()?.is_some() { bail!("deleted: feedback cannot resurrect deleted decision"); }
+        if clean["kind"]=="run_manifest" {
+            if let Some(segments)=clean["payload"]["segments"].as_array() {
+                for segment in segments {
+                    if let Some(reference)=segment["decision_id"].as_str() {
+                        if tx.query_row("SELECT 1 FROM deleted_decisions WHERE id=?",[reference],|_|Ok(())).optional()?.is_some() {bail!("deleted: run manifest references deleted decision");}
+                    }
+                }
+            }
+        }
         let previous: Option<(String, String, Option<String>)> = tx.query_row("SELECT hash,state,receipt FROM outbox WHERE event_id=?", [id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
         if let Some((old, state, receipt)) = previous {
             if old != digest { bail!("conflict: event_id already exists with different payload"); }
@@ -100,6 +109,7 @@ impl Outbox {
         let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         tx.execute("INSERT OR IGNORE INTO deleted_decisions(id) VALUES(?)", [id])?;
         tx.execute("DELETE FROM outbox WHERE decision_id=?", [id])?;
+        tx.execute("DELETE FROM outbox WHERE json_extract(payload,'$.kind')='run_manifest' AND EXISTS(SELECT 1 FROM json_each(outbox.payload,'$.payload.segments') segment WHERE CASE WHEN segment.type='object' THEN json_extract(segment.value,'$.decision_id') END=?1)",[id])?;
         tx.execute("DELETE FROM snapshots WHERE decision_id=?", [id])?;
         tx.commit()?;
         Ok(())
@@ -202,6 +212,49 @@ mod tests {
     fn failed_commit_never_claims_queued() {
         let dir=tempfile::tempdir().unwrap();let out=Outbox::open(dir.path()).unwrap();
         out.connection().unwrap().execute_batch("CREATE TRIGGER simulate_full BEFORE INSERT ON outbox BEGIN SELECT RAISE(ABORT,'database or disk is full'); END;").unwrap();
+        assert!(out.enqueue(&event()).is_err());
+        assert!(out.pending().unwrap().is_empty());
+    }
+
+    #[test]
+    fn manifest_privacy_delete_scrubs_cross_decision_queue_and_blocks_replay() {
+        let dir=tempfile::tempdir().unwrap();
+        let out=Outbox::open(dir.path()).unwrap();
+        let manifest=json!({"event_id":"manifest","decision_id":"root","kind":"run_manifest","payload":{"segments":[{"decision_id":"root"},{"decision_id":"child"}]}});
+        out.enqueue(&manifest).unwrap();
+        out.enqueue(&event()).unwrap();
+        out.failed("manifest","temporarily unavailable",true).unwrap();
+        out.delete_decision("child").unwrap();
+        assert!(out.retry("manifest").is_err());
+        assert!(out.enqueue(&manifest).unwrap_err().to_string().contains("deleted"));
+        drop(out);
+        let out=Outbox::open(dir.path()).unwrap();
+        assert_eq!(out.pending().unwrap(),vec![event()]);
+        assert!(out.enqueue(&manifest).is_err());
+    }
+
+    #[test]
+    fn manifest_acknowledgement_does_not_bypass_reference_tombstone() {
+        let dir=tempfile::tempdir().unwrap();
+        let out=Outbox::open(dir.path()).unwrap();
+        let manifest=json!({"event_id":"manifest","decision_id":"root","kind":"run_manifest","payload":{"segments":[{"decision_id":"child"}]}});
+        out.enqueue(&manifest).unwrap();
+        out.acknowledge(&manifest,&json!({"event_id":"manifest","status":"stored","payload_hash":hash(&manifest)})).unwrap();
+        out.delete_decision("child").unwrap();
+        assert!(out.enqueue(&manifest).is_err());
+    }
+
+    #[test]
+    fn malformed_manifest_segments_cannot_block_unrelated_privacy_delete() {
+        let dir=tempfile::tempdir().unwrap();
+        let out=Outbox::open(dir.path()).unwrap();
+        for (index,segments) in [json!(["bad",null,17]),json!("bad"),json!({"bad":"text"})].into_iter().enumerate() {
+            let id=format!("malformed-{index}");
+            out.enqueue(&json!({"event_id":id,"decision_id":"other","kind":"run_manifest","payload":{"segments":segments}})).unwrap();
+            out.failed(&id,"invalid: manifest",true).unwrap();
+        }
+        out.enqueue(&event()).unwrap();
+        out.delete_decision("d1").unwrap();
         assert!(out.enqueue(&event()).is_err());
         assert!(out.pending().unwrap().is_empty());
     }

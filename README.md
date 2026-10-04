@@ -4,7 +4,7 @@
 
 Workbench V1 is available as a [prebuilt preview](https://github.com/leo1394/oh-my-laya/releases/tag/v0.2.0-rc.2). The installer verifies and installs it without Rust or Node.js. See [usage and verification status](docs/workbench-implementation-status.md) for remaining acceptance limits.
 
-> One command to bring local Laya decision-making to your coding agents.
+> Oh My Laya — Reflect. Route. Refine.
 
 Oh My Laya builds on [laya-mlx](https://github.com/mizorewww/laya-mlx). It downloads and verifies Hugging Face weights, then registers the `laya_tell_me` tool for classification, scoring, risk routing, and yes/no decisions. Inference runs entirely on your Mac after the model is downloaded.
 
@@ -48,6 +48,14 @@ For Codex, installation adds **Oh My Laya** as a local plugin with its logo and 
 Open **Plugins → Personal → Oh My Laya**, then start a new task to use it.
 An up-to-date Codex CLI with `plugin add` support is required. Re-run the same installer to update.
 Laya Model Advisor and Alpha Squad remain separately installed Skills; Alpha Squad is fetched from GitHub.
+
+Open the local Decision workbench:
+
+```bash
+laya dashboard
+```
+
+The default address is **http://127.0.0.1:18686**. Run `laya dashboard` to start the service and pair your browser. Use `laya dashboard --port 18687` for a different port. If a service is already running, finish active tasks and run `laya stop` before changing its port; the command never interrupts it automatically.
 
 Start the local Snake demo after installation:
 

@@ -20,6 +20,33 @@ MODELS = [
 
 
 class AdvisorTests(unittest.TestCase):
+    def test_workbench_tiers_respect_host_catalog_and_auto_ceiling(self):
+        settings = {"policy": "auto", "needs_policy_selection": False,
+                    "ceiling": {"model": "fast-test", "reasoning_effort": "medium"},
+                    "model_tiers": {"low": {"model": "fast-test", "reasoning_effort": "medium"}}}
+        advice = build_advice(result(), MODELS, "fast-test", settings)
+        self.assertEqual(advice["recommendation"], settings["model_tiers"]["low"])
+        self.assertTrue(advice["recommendation_accepted"])
+        for pair in (
+            {"model": "strong-test", "reasoning_effort": "high"},
+            {"model": "fast-test", "reasoning_effort": "ultra"},
+            {"model": "retired-model", "reasoning_effort": "low"},
+        ):
+            settings["model_tiers"]["low"] = pair
+            advice = build_advice(result(), MODELS, "fast-test", settings)
+            self.assertIsNone(advice["recommendation"])
+            self.assertTrue(advice["ask_user"])
+            self.assertTrue(advice["tier_profile_blocked"])
+            self.assertFalse(advice["recommendation_accepted"])
+        settings["model_tiers"]["low"] = {"model": "fast-test", "reasoning_effort": "medium"}
+        settings["ceiling"]["reasoning_effort"] = "low"
+        self.assertIsNone(build_advice(result(), MODELS, "fast-test", settings)["recommendation"])
+        settings["policy"] = "always"
+        settings["model_tiers"]["low"] = {"model": "strong-test", "reasoning_effort": "medium"}
+        advice = build_advice(result(), MODELS, "fast-test", settings)
+        self.assertEqual(advice["recommendation"], settings["model_tiers"]["low"])
+        self.assertTrue(advice["ask_user"])
+
     def advise(self, raw=None, policy="always", models=None, configured=True):
         return build_advice(
             raw if raw is not None else result(), MODELS if models is None else models,

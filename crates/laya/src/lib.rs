@@ -8,6 +8,7 @@ pub mod store;
 pub mod service;
 pub mod assets;
 pub mod evaluation;
+pub mod scenario;
 
 #[cfg(test)]
 mod fault_tests;

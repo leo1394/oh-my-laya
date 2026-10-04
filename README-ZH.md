@@ -9,7 +9,7 @@ Laya Model Advisor 与 Alpha Squad 仍作为独立 Skill 安装，Alpha Squad �
 
 工作台 V1 已提供[预编译预览版](https://github.com/leo1394/oh-my-laya/releases/tag/v0.2.0-rc.2)，安装器自动校验并安装，无需 Rust 或 Node.js。尚未完成的验收项目见[使用与验证状态](docs/workbench-implementation-status.md)。
 
-> 一条命令，把本地 Laya 决策能力接入你的编码 Agent。
+> Oh My Laya — Reflect. Route. Refine.
 
 Oh My Laya 基于 [laya-mlx](https://github.com/mizorewww/laya-mlx)，自动下载并校验 Hugging Face 权重，随后注册 `laya_tell_me` 工具。它适合做分类、评分、风险分流和是非判断；模型下载完成后，推理完全在本机运行。
 
@@ -48,6 +48,14 @@ sh -c "$(wget -qO- https://raw.githubusercontent.com/leo1394/oh-my-laya/master/t
 ```
 
 `all` 和 `both` 都表示注册到所有已检测到的客户端。安装完成后，请重启对应 Agent 会话。
+
+打开本地决策工作台：
+
+```bash
+laya dashboard
+```
+
+默认地址固定为 **http://127.0.0.1:18686**。运行 `laya dashboard` 会启动服务并完成浏览器配对。需要其他端口时使用 `laya dashboard --port 18687`。已有服务运行时，先完成当前任务，再运行 `laya stop` 后更换端口；命令不会自动中断服务。
 
 安装完成后，启动本地贪吃蛇演示：
 

@@ -170,6 +170,16 @@ explain and reopen selection instead of silently substituting a different effort
    preferences; never infer a ranking from model names. Without a tier mapping,
    advice retains the known current model and adjusts only reasoning. Explain
    this fallback; users can still choose any listed model themselves.
+   When tool discovery advertises retrieval scope, also pass `advisor.task_family`
+   as a factual routing category (for example `documentation` or `migration`).
+   Use a lowercase ASCII slug of at most 64 characters; `docs` aliases to
+   `documentation`. An unknown category stays `general`, not a guessed match to
+   an existing case. Pass `advisor.task_lineage` only from a known stable task
+   source, shared across its retries and subagent attempts (at most 128 ASCII
+   letters/digits or `-_.:/`). Omit it when unknown; never manufacture independent
+   provenance from an individual decision or attempt ID. These optional fields
+   scope retrieval, not model choice, authorization or human review. Older tools
+   without this contract continue without them.
 3. Keep `state` a short, factual summary of requirements, impact and unknowns
    (roughly 200 tokens). Never include credentials, full source files or the model
    catalog in state. Catalog/policy are processed outside Laya. If the tool fails,

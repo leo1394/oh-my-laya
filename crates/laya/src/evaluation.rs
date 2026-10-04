@@ -1,4 +1,4 @@
-use crate::{protocol::{hash, now}, service::{App,worker_cases}};
+use crate::{protocol::{hash, now}, service::{App,worker_cases}, store::{EVALUATOR_IDENTITY,RETRIEVAL_POLICY_VERSION}};
 use anyhow::{bail, Context, Result};
 use serde_json::{json,Value};
 use std::{os::unix::fs::PermissionsExt,path::{Path,PathBuf}};
@@ -53,15 +53,16 @@ async fn evaluate(app:&App,id:&str,input:&Value) -> Result<Value> {
         let mut runs=Vec::new();
         for version_id in [None,current.as_deref(),Some(version)] {
             checkpoint(app,id).await?;
+            let configuration=json!({"task_family":case["family"],"task_lineage":case["lineage"],"language":case["language"]});
             let memory=if let Some(v)=version_id {
-                app.store.call("memory/retrieve",json!({"query":case["state"],"version":v,"evaluation":true,"exclude_task_families":[case["family"]],"configuration":{"language":case["language"]}})).await?
-            } else {json!({"cases":[]})};
+                app.store.call("memory/retrieve",json!({"query":case["state"],"version":v,"evaluation":true,"exclude_ids":[case["id"]],"configuration":configuration})).await?
+            } else {json!({"version":null,"cases":[],"reason":"no_memory_version"})};
             let start=std::time::Instant::now();
             // Synthetic catalog is an evaluation fixture, not an available host model list.
             let result=app.worker.call("predict",json!({"state":case["state"],"advisor":{"models":[{"id":"evaluation-fixture","reasoning_efforts":["low","medium","high"]}],"current_model":"evaluation-fixture"},"memory_cases":worker_cases(&memory)})).await?;
-            runs.push(json!({"result":result,"latency_ms":start.elapsed().as_millis(),"case_ids":memory["cases"].as_array().map(|a|a.iter().map(|v|v["id"].clone()).collect::<Vec<_>>()).unwrap_or_default()}));
+            runs.push(json!({"result":result,"latency_ms":start.elapsed().as_millis(),"case_ids":memory["cases"].as_array().map(|a|a.iter().map(|v|v["id"].clone()).collect::<Vec<_>>()).unwrap_or_default(),"retrieval":{"configuration":configuration,"reason":memory["reason"],"version":memory["version"]}}));
         }
-        rows.push(json!({"id":case["id"],"family":case["family"],"language":case["language"],"expected":case["labels"],"runs":runs}));
+        rows.push(json!({"id":case["id"],"family":case["family"],"task_lineage":case["lineage"],"language":case["language"],"expected":case["labels"],"runs":runs}));
         app.store.call("jobs/update",json!({"id":id,"progress":{"completed":index+1,"total":cases.len()}})).await?;
         app.changed.notify_waiters();
     }
@@ -78,6 +79,8 @@ async fn evaluate(app:&App,id:&str,input:&Value) -> Result<Value> {
     report["evaluated_at"]=json!(now());
     report["current_version"]=json!(current);
     report["scope"]=json!("fixed local regression set; not proof of general capability improvement");
+    report["evaluator_identity"]=json!(EVALUATOR_IDENTITY);
+    report["retrieval_policy_version"]=json!(RETRIEVAL_POLICY_VERSION);
     app.store.call("versions/report",json!({"id":version,"report":report})).await?;
     Ok(report)
 }
@@ -93,6 +96,12 @@ fn valid_suggestion(run:&Value)->bool {
         && matches!(recommendation["reasoning_effort"].as_str(),Some("low"|"medium"|"high"))
 }
 
+fn verified_case_ids(run:&Value)->Option<&Vec<Value>> {
+    let selected=run["case_ids"].as_array()?;
+    let received=run["result"]["meta"]["case_ids"].as_array()?;
+    if selected==received && received.iter().all(Value::is_string) {Some(received)} else {None}
+}
+
 pub fn score(rows:&[Value],minimum:usize)->Value {
     let mut correct=[0usize;3];
     let mut denominator=0;
@@ -101,11 +110,13 @@ pub fn score(rows:&[Value],minimum:usize)->Value {
     let mut uncertain=[0usize;3];
     let mut uncertain_total=0;
     let mut run_shape_errors=0;
+    let mut candidate_memory_exposure=0usize;
     let mut dimensions=serde_json::Map::new();
     for dimension in ["complexity","risk","certainty"] {dimensions.insert(dimension.into(),json!({"denominator":0,"correct":[0,0,0]}));}
     for row in rows {
         let runs=row["runs"].as_array();
         if runs.map(Vec::len)!=Some(3) {run_shape_errors+=1;}
+        candidate_memory_exposure+=runs.and_then(|runs|runs.get(2)).and_then(verified_case_ids).map(Vec::len).unwrap_or(0);
         for (dimension,expected) in row["expected"].as_object().into_iter().flatten() {
             denominator+=1;
             if let Some(stats)=dimensions.get_mut(dimension) {stats["denominator"]=json!(stats["denominator"].as_u64().unwrap_or(0)+1);}
@@ -123,6 +134,7 @@ pub fn score(rows:&[Value],minimum:usize)->Value {
             }
         }
         for run in runs.into_iter().flatten() {
+            if verified_case_ids(run).is_none() {invalid+=1;}
             for key in ["complexity","risk","certainty"] {
                 let permitted=if key=="certainty" {vec!["clear","uncertain"]}else{vec!["low","medium","high"]};
                 if !choice(run,key).map(|c|permitted.contains(&c)).unwrap_or(false) {invalid+=1;}
@@ -134,7 +146,7 @@ pub fn score(rows:&[Value],minimum:usize)->Value {
         if runs.map(Vec::len)==Some(3) && row["expected"]["risk"]=="high" && choice(&row["runs"][2],"risk")==Some("low") && (choice(&row["runs"][0],"risk")!=Some("low") || choice(&row["runs"][1],"risk")!=Some("low")) {regressions+=1;}
     }
     let uncertain_regressed=uncertain[2]<uncertain[0] || uncertain[2]<uncertain[1];
-    json!({"passed":rows.len()>=minimum && denominator>0 && invalid==0 && run_shape_errors==0 && regressions==0 && !uncertain_regressed && correct[2]>=correct[0] && correct[2]>=correct[1],"sample_count":rows.len(),"label_denominator":denominator,"dimensions":dimensions,"run_order":["baseline","current","candidate"],"correct_labels":{"baseline":correct[0],"current":correct[1],"candidate":correct[2]},"new_high_to_low":regressions,"invalid_outputs":invalid,"run_shape_errors":run_shape_errors,"uncertain_total":uncertain_total,"uncertain_asks":uncertain,"uncertain_ask_regressed":uncertain_regressed})
+    json!({"passed":rows.len()>=minimum && denominator>0 && candidate_memory_exposure>0 && invalid==0 && run_shape_errors==0 && regressions==0 && !uncertain_regressed && correct[2]>=correct[0] && correct[2]>=correct[1],"sample_count":rows.len(),"label_denominator":denominator,"candidate_memory_exposure":candidate_memory_exposure,"dimensions":dimensions,"run_order":["baseline","current","candidate"],"correct_labels":{"baseline":correct[0],"current":correct[1],"candidate":correct[2]},"new_high_to_low":regressions,"invalid_outputs":invalid,"run_shape_errors":run_shape_errors,"uncertain_total":uncertain_total,"uncertain_asks":uncertain,"uncertain_ask_regressed":uncertain_regressed})
 }
 
 pub fn artifact_path(root:&Path,artifact_id:&str)->Result<PathBuf> {
@@ -209,7 +221,7 @@ async fn export(app:&App,id:&str)->Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn run(ask:bool,model:&str,effort:&str)->Value {json!({"result":{"laya_result":{"answers":{"complexity":{"choice":"low"},"risk":{"choice":"low"},"certainty":{"choice":"uncertain"}}},"advice":{"ask_user":ask,"recommendation":{"model":model,"reasoning_effort":effort},"delegation":{"parent_model_switched":false}}}})}
+    fn run(ask:bool,model:&str,effort:&str)->Value {json!({"result":{"meta":{"case_ids":["eligible"]},"laya_result":{"answers":{"complexity":{"choice":"low"},"risk":{"choice":"low"},"certainty":{"choice":"uncertain"}}},"advice":{"ask_user":ask,"recommendation":{"model":model,"reasoning_effort":effort},"delegation":{"parent_model_switched":false}}},"case_ids":["eligible"]})}
     fn row(runs:Vec<Value>)->Value {json!({"expected":{"complexity":"low","risk":"low","certainty":"uncertain"},"runs":runs})}
     #[test]
     fn empty_evaluation_never_passes() {assert_eq!(score(&[],16)["passed"],false);}
@@ -231,6 +243,24 @@ mod tests {
     fn safe_three_run_fixture_can_pass() {
         let report=score(&[row(vec![run(true,"evaluation-fixture","low"),run(true,"evaluation-fixture","medium"),run(true,"evaluation-fixture","high")])],1);
         assert_eq!(report["passed"],true);
+    }
+    #[test]
+    fn no_candidate_memory_exposure_never_passes() {
+        let mut runs=vec![run(true,"evaluation-fixture","low"),run(true,"evaluation-fixture","medium"),run(true,"evaluation-fixture","high")];
+        runs[2]["case_ids"]=json!([]);
+        runs[2]["result"]["meta"]["case_ids"]=json!([]);
+        let report=score(&[row(runs)],1);
+        assert_eq!(report["candidate_memory_exposure"],0); assert_eq!(report["passed"],false);
+    }
+    #[test]
+    fn missing_or_mismatched_worker_receipt_never_counts_as_exposure() {
+        for receipt in [Value::Null,json!([]),json!(["another-case"])] {
+            let mut runs=vec![run(true,"evaluation-fixture","low");3];
+            runs[2]["result"]["meta"]["case_ids"]=receipt;
+            let report=score(&[row(runs)],1);
+            assert_eq!(report["candidate_memory_exposure"],0);
+            assert_eq!(report["invalid_outputs"],1); assert_eq!(report["passed"],false);
+        }
     }
     #[test]
     fn suggestions_are_limited_to_fixture_model_and_efforts() {

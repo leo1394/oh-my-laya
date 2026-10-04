@@ -8,7 +8,7 @@ pub fn tools() -> Value {
     let mut tools=json!({"tools":[
         {"name":"laya_tell_me","description":"Run a local typed Laya decision. Advisor recommendations never authorize actions or change the current model.","inputSchema":{"type":"object","required":["state"],"additionalProperties":false,"properties":{"state":{"anyOf":[{"type":"string"},{"type":"object"},{"type":"array"}]},"questions":{"type":["object","null"]},"advisor":{"type":["object","null"]}}}},
         {"name":"laya_advisor_preferences","description":"Read settings; save only after user's Confirm and continue. Recommendation permissions do not authorize execution or recording.","inputSchema":{"type":"object","additionalProperties":false,"properties":{"policy":{"type":["string","null"],"enum":["always","conditional","auto",null]},"ceiling":{"type":["object","null"]},"models":{"type":["array","null"]},"squad":{"type":["object","null"]}}}},
-        {"name":"laya_feedback","description":"Record structured Squad evidence with stable event_id. Preserve initial scores; retry the exact same event. stored means committed; queued_local means durably awaiting delivery. Does not approve labels or activate learning.","inputSchema":{"type":"object","additionalProperties":false,"required":["protocol_version","event_id","decision_id","attempt_ref","kind","source","payload"],"properties":{"protocol_version":{"type":"integer","const":1},"event_id":{"type":"string"},"decision_id":{"type":"string"},"attempt_ref":{"type":"string"},"kind":{"enum":["assignment","test","review","outcome","user_choice","usage"]},"source":{"type":"object"},"payload":{"type":"object"}}}}
+        {"name":"laya_feedback","description":"Record structured Squad evidence with stable event_id. Preserve initial scores; retry the exact same event. stored means committed; queued_local means durably awaiting delivery. Does not approve labels or activate learning.","inputSchema":{"type":"object","additionalProperties":false,"required":["protocol_version","event_id","decision_id","attempt_ref","kind","source","payload"],"properties":{"protocol_version":{"type":"integer","const":1},"event_id":{"type":"string"},"decision_id":{"type":"string"},"attempt_ref":{"type":"string"},"kind":{"enum":["assignment","test","review","outcome","user_choice","usage","run_manifest"]},"source":{"type":"object"},"payload":{"type":"object"}}}}
     ]});
     tools["tools"][2]["inputSchema"]=serde_json::from_str(include_str!("../../../contracts/feedback.schema.json")).expect("bundled feedback schema is valid JSON");
     tools["tools"][0]["description"]=json!("Run a local typed Laya decision. Provide questions keyed by question id, each with type, instructions and criteria (not options). Alternatively omit questions and provide advisor. Advisor recommendations never authorize actions or change the current model.");
@@ -29,6 +29,11 @@ pub fn tools() -> Value {
             ]
         }
     });
+    tools["tools"][0]["inputSchema"]["properties"]["advisor"]["properties"]=json!({
+        "task_family":{"type":"string","maxLength":64,"pattern":"^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$","description":"Optional reviewed-memory routing scope. Canonicalized to lowercase; docs aliases to documentation. Omit when unknown."},
+        "task_lineage":{"type":"string","maxLength":128,"pattern":"^[A-Za-z0-9][A-Za-z0-9_.:/-]*$","description":"Optional independent task/holdout provenance. Same-lineage memory is excluded. Omit when unknown; it is never inferred."}
+    });
+    tools["tools"][0]["inputSchema"]["properties"]["advisor"]["description"]=json!("Advisor catalog and optional memory routing metadata. Retrieval language is derived from state; no advisor.language field is accepted for routing.");
     tools
 }
 
@@ -173,5 +178,9 @@ mod tests {
         assert_eq!(questions["maxProperties"],64);
         assert!(questions["description"].as_str().unwrap().contains("Example:"));
         assert!(tool["description"].as_str().unwrap().contains("omit questions and provide advisor"));
+        let advisor=&tool["inputSchema"]["properties"]["advisor"];
+        assert_eq!(advisor["properties"]["task_family"]["maxLength"],64);
+        assert_eq!(advisor["properties"]["task_lineage"]["maxLength"],128);
+        assert!(advisor["description"].as_str().unwrap().contains("language is derived"));
     }
 }
