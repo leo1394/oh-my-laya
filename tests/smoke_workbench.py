@@ -104,15 +104,29 @@ def main():
             assert rpc("status")["worker"]["pid"] == 0
             decision = rpc("predict", {"state": "Check a rollback migration", "advisor": {"models": [], "task_family": "migration", "task_lineage": "smoke-rollback-review"}}, "decision-smoke")
             assert decision["meta"]["recording_status"] == "stored", decision
+            tester = {"protocol_version": 1, "event_id": "tester-pass", "decision_id": "decision-smoke", "attempt_ref": "attempt-1",
+                      "kind": "test", "source": {"host": "codex", "role": "tester", "actor_type": "agent"},
+                      "payload": {"result": "pass", "summary": "Scoped tests pass; this does not establish rollback safety"}}
+            tester_request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "laya_feedback", "arguments": tester}}
+            tester_reply = subprocess.run([str(BINARY), "mcp"], input=json.dumps(tester_request)+"\n", env=env, text=True, capture_output=True, timeout=10, check=True)
+            assert json.loads(tester_reply.stdout)["result"]["structuredContent"]["status"] == "stored"
             event = {"protocol_version": 1, "event_id": "first-score", "decision_id": "decision-smoke", "attempt_ref": "attempt-1",
                      "kind": "review", "source": {"host": "codex", "role": "reviewer", "actor_type": "agent"},
-                     "payload": {"outcome": "changes_requested", "scores": [{"rubric_version": "laya-feedback-v1", "dimension": "judgment_quality", "value": 0,
+                     "payload": {"outcome": "changes_requested", "proposed_labels": {"risk": "high"}, "scores": [{"rubric_version": "laya-feedback-v1", "dimension": "judgment_quality", "value": 0,
                      "reason": "Missing rollback plan", "evidence_refs": [], "phase": "initial", "source_sequence": 1, "observed_at": "2026-09-25T00:00:00Z"}]}}
             tool_request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "laya_feedback", "arguments": event}}
             reply = subprocess.run([str(BINARY), "mcp"], input=json.dumps(tool_request)+"\n", env=env, text=True, capture_output=True, timeout=10, check=True)
             result = json.loads(reply.stdout)["result"]
             assert result.get("structuredContent", {}).get("status") == "stored", result
             assert rpc("feedback", event)["status"] == "stored"
+            disagreement = http("/api/v1/decisions/decision-smoke")
+            assert disagreement["reviews"] == [], disagreement
+            assert disagreement["risk"] == "low", disagreement
+            assert {item["event_id"] for item in disagreement["feedback"]} == {"tester-pass", "first-score"}
+            pending = http("/api/v1/decisions?filter=pending")["items"]
+            assert len(pending) == 1 and pending[0]["id"] == "decision-smoke", pending
+            assert "review_disagreement" in pending[0]["review_reasons"], pending
+            assert "reported_high_risk_correction" in pending[0]["review_reasons"], pending
             # Kill an offline MCP bridge only after its independent outbox commit.
             rpc("stop")
             service.wait(timeout=5)
@@ -154,15 +168,16 @@ def main():
             http("/api/v1/pair", {"code": code})
             for _ in range(300):
                 detail = http("/api/v1/decisions/decision-smoke")
-                if len(detail["feedback"]) == 3:
+                if len(detail["feedback"]) == 4:
                     break
                 time.sleep(0.05)
-            assert len(detail["feedback"]) == 3, detail
+            assert len(detail["feedback"]) == 4, detail
             stored_initial = next(item for item in detail["feedback"] if item["event_id"] == "offline-initial")
             assert stored_initial["payload"]["scores"][0]["value"] == 0
             detail = http("/api/v1/decisions/decision-smoke")
-            assert len(detail["feedback"]) == 3
-            assert detail["feedback"][0]["payload"]["scores"][0]["value"] == 0
+            assert len(detail["feedback"]) == 4
+            assert next(item for item in detail["feedback"] if item["event_id"] == "first-score")["payload"]["scores"][0]["value"] == 0
+            assert next(item for item in detail["feedback"] if item["event_id"] == "tester-pass")["payload"]["result"] == "pass"
             review = http("/api/v1/decisions/decision-smoke/reviews", {"expected_revision": 0, "status": "corrected", "labels": {"complexity": "high", "risk": "high", "certainty": "clear"}, "task_family": "migration", "task_lineage": "smoke-rollback-review", "language": "en", "applicability": "task-fact", "reason": "Rollback has data-loss consequences"})
             version = http("/api/v1/memory-versions", {"case_ids": [review["case_id"]]})
             version_id = version.get("id") or version.get("version", {}).get("id")

@@ -126,9 +126,13 @@ def main():
                 assert disabled["meta"]["case_ids"] == [], disabled
                 assert disabled["meta"]["worker_case_ids"] == [], disabled
                 assert rpc("status")["settings"]["memory_enabled"] is False
-                print(json.dumps({"lifecycle": "passed", "scope": "disposable simulated user review and activation; actual MLX over MCP stdio",
+                lifecycle = {"lifecycle": "passed", "scope": "disposable simulated user review and activation; actual MLX over MCP stdio",
                                   "version_id": version["id"], "case_id": review["case_id"],
-                                  "enabled": remembered["meta"], "disabled": disabled["meta"]}))
+                                  "enabled": remembered["meta"], "disabled": disabled["meta"]}
+                if os.environ.get("LAYA_EVAL_REPORT"):
+                    with Path(os.environ["LAYA_EVAL_REPORT"] + ".lifecycle.json").open("x") as output:
+                        json.dump(lifecycle, output, indent=2)
+                print(json.dumps(lifecycle))
         finally:
             try:
                 rpc("stop")
