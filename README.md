@@ -2,7 +2,7 @@
 
 [English](README.md) | [中文](README-ZH.md)
 
-Workbench V1 is available as a [prebuilt preview](https://github.com/leo1394/oh-my-laya/releases/tag/v0.2.0-rc.2). The installer verifies and installs it without Rust or Node.js. See [usage and verification status](docs/workbench-implementation-status.md) for remaining acceptance limits.
+Workbench V1 is available as a [prebuilt preview](https://github.com/leo1394/oh-my-laya/releases/tag/v0.2.0-rc.3). The installer verifies and installs it without Rust or Node.js. See [usage and verification status](docs/workbench-implementation-status.md) for remaining acceptance limits.
 
 > Oh My Laya — Reflect. Route. Refine.
 

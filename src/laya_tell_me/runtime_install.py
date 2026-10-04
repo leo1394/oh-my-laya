@@ -10,12 +10,12 @@ from urllib import request
 
 
 WORKBENCH_VERSION = "0.2.0"
-# Public release bytes independently verified on 2026-10-04.
+# Public release bytes independently verified on 2026-10-05.
 # Never replace an existing asset; publish a new tag when its bytes change.
 TRUSTED_RELEASES = {
     "0.2.0": {
-        "url": "https://github.com/leo1394/oh-my-laya/releases/download/v0.2.0-rc.2/laya-macos-arm64",
-        "sha256": "0de89eddc61cb8a4ccf50f9f4c75bffe5c4f35c92330322d1b4b206cf0a68b01",
+        "url": "https://github.com/leo1394/oh-my-laya/releases/download/v0.2.0-rc.3/laya-macos-arm64",
+        "sha256": "15316d19599fb2df80436a4250bd0a516dadca0454f5a196f8beb532b4486854",
     },
 }
 LAUNCHER_MARKER = "# Managed by oh-my-laya: workbench launcher v1\n"

@@ -7,7 +7,7 @@ Laya Model Advisor 与 Alpha Squad 仍作为独立 Skill 安装，Alpha Squad �
 
 [English](README.md) | [简体中文](README-ZH.md)
 
-工作台 V1 已提供[预编译预览版](https://github.com/leo1394/oh-my-laya/releases/tag/v0.2.0-rc.2)，安装器自动校验并安装，无需 Rust 或 Node.js。尚未完成的验收项目见[使用与验证状态](docs/workbench-implementation-status.md)。
+工作台 V1 已提供[预编译预览版](https://github.com/leo1394/oh-my-laya/releases/tag/v0.2.0-rc.3)，安装器自动校验并安装，无需 Rust 或 Node.js。尚未完成的验收项目见[使用与验证状态](docs/workbench-implementation-status.md)。
 
 > Oh My Laya — Reflect. Route. Refine.
 
