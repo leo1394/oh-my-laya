@@ -129,7 +129,7 @@ class GoalWorkflowTests(unittest.TestCase):
                 patch.object(installer, "register_advisor_skill"), \
                 patch.object(installer, "register_codex"), \
                 patch.object(installer, "install_runtime", return_value=(Path("/bin/server"), Path("/models"))), \
-                patch.object(installer, "register_alpha_squad_skill", side_effect=lambda dry_run: events.append(("alpha", dry_run))), \
+                patch.object(installer, "register_alpha_squad_skill", side_effect=lambda dry_run, **kwargs: events.append(("alpha", dry_run))), \
                 patch.object(installer, "install_goal_workflow", side_effect=lambda dry_run: events.append(("goal", dry_run))):
             installer.main(["--source-root", str(source), "--targets", "codex", "--goal-workflow", "yes"])
             self.assertEqual(events, [("goal", True), ("alpha", True), ("alpha", False), ("goal", False)])

@@ -17,3 +17,4 @@ tests/*
 tests/fixtures/*
 !tests/fixtures/workbench_worker.py
 integrations/pi/node_modules/
+/docs/

@@ -3,7 +3,7 @@
 Codex 安装会注册带 Logo 和 MCP 工具的本地 **Oh My Laya** 插件。
 安装后在 **Plugins → Personal → Oh My Laya** 查看，并新建任务使用。
 需要支持 `plugin add` 的新版 Codex CLI；更新时重新运行安装命令即可。
-Laya Model Advisor 与 Alpha Squad 仍作为独立 Skill 安装，Alpha Squad 从 GitHub 获取。
+Laya Model Advisor 与 Alpha Squad 仍作为独立 Skill 安装，Alpha Squad 使用本地子模块中的源码。
 
 [English](README.md) | [简体中文](README-ZH.md)
 
@@ -155,8 +155,8 @@ Laya 不生成代码，也不应被用于授权删除、发布等高风险操作
 
 ## Codex 模型建议
 
-每个选中的客户端都会安装建议 Skill，并从 GitHub 获取最新版
-[Alpha Squad](https://github.com/leo1394/skill-alpha-squad-coding-craft)。已有的非托管版本或本地修改会被保留。
+每个选中的客户端都会安装建议 Skill，以及本地 `skills/alpha-squad-coding-craft` 子模块中的
+[Alpha Squad](https://github.com/leo1394/skill-alpha-squad-coding-craft) 配套版本。安装器会自动补齐缺失的源码。已有的非托管版本或本地修改会被保留。
 重启客户端。在 Codex 中可输入：
 
 ```text

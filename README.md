@@ -47,7 +47,7 @@ Both `all` and `both` register every detected client. Restart the affected agent
 For Codex, installation adds **Oh My Laya** as a local plugin with its logo and MCP tools.
 Open **Plugins → Personal → Oh My Laya**, then start a new task to use it.
 An up-to-date Codex CLI with `plugin add` support is required. Re-run the same installer to update.
-Laya Model Advisor and Alpha Squad remain separately installed Skills; Alpha Squad is fetched from GitHub.
+Laya Model Advisor and Alpha Squad remain separately installed Skills; Alpha Squad is installed from the local bundled submodule.
 
 Open the local Decision workbench:
 
@@ -160,8 +160,8 @@ Laya does not generate code and must not authorize destructive, publishing, or o
 
 ## Codex Model Advisor
 
-Each selected client gets the advisor skill and the latest
-[Alpha Squad](https://github.com/leo1394/skill-alpha-squad-coding-craft) from GitHub.
+Each selected client gets the advisor skill and the bundled
+[Alpha Squad](https://github.com/leo1394/skill-alpha-squad-coding-craft) version from the local `skills/alpha-squad-coding-craft` submodule. The installer initializes missing sources automatically.
 Existing unmanaged or locally modified Alpha Squad installations are preserved.
 Restart the client. In Codex, ask:
 

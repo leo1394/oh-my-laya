@@ -187,6 +187,8 @@ def register_advisor_skill(source_root: Path, dry_run: bool, skills_dir=None):
 ALPHA_SQUAD_REPOSITORY = "https://github.com/leo1394/skill-alpha-squad-coding-craft.git"
 ALPHA_SQUAD_ARCHIVE = "https://codeload.github.com/leo1394/skill-alpha-squad-coding-craft/zip/HEAD"
 ALPHA_SQUAD_PATH = Path("skills") / "alpha-squad-coding-craft"
+# Keep the archive fallback in sync with the submodule gitlink.
+ALPHA_SQUAD_REVISION = "b5af3da99924756089e250c8930dd7d3553fbd47"
 MAX_ALPHA_ARCHIVE_BYTES = 20 * 1024 * 1024
 MAX_ALPHA_EXTRACTED_BYTES = 100 * 1024 * 1024
 MAX_ALPHA_FILES = 1000
@@ -320,9 +322,9 @@ def _safe_alpha_archive_extract(archive: Path, workspace: Path):
     return source
 
 
-def _download_alpha_squad_skill(workspace: Path):
+def _download_alpha_squad_skill(workspace: Path, *, revision=None):
     workspace.mkdir(parents=True, exist_ok=True)
-    git = shutil.which("git")
+    git = shutil.which("git") if revision is None else None
     if git:
         checkout = workspace / "checkout"
         try:
@@ -345,7 +347,8 @@ def _download_alpha_squad_skill(workspace: Path):
 
     archive = workspace / "alpha-squad.zip"
     try:
-        with request.urlopen(ALPHA_SQUAD_ARCHIVE, timeout=30) as response, archive.open("wb") as output:
+        url = ALPHA_SQUAD_ARCHIVE if revision is None else ALPHA_SQUAD_ARCHIVE.replace("/HEAD", f"/{revision}")
+        with request.urlopen(url, timeout=30) as response, archive.open("wb") as output:
             while chunk := response.read(64 * 1024):
                 if output.tell() + len(chunk) > MAX_ALPHA_ARCHIVE_BYTES:
                     raise RuntimeError("Alpha squad archive exceeds download limit")
@@ -356,6 +359,35 @@ def _download_alpha_squad_skill(workspace: Path):
         return _safe_alpha_archive_extract(archive, workspace)
     except zipfile.BadZipFile as error:
         raise RuntimeError("Downloaded alpha squad archive is invalid") from error
+
+
+def _local_alpha_squad_skill(source_root: Path):
+    checkout = source_root / ALPHA_SQUAD_PATH
+    source = checkout / ALPHA_SQUAD_PATH
+    if any(path.is_symlink() for path in (source_root / "skills", checkout, checkout / "skills", source)):
+        raise RuntimeError("Alpha squad source path must not be symlinked")
+    if (source / "SKILL.md").is_file():
+        _alpha_manifest(source)
+        return source
+    if checkout.exists() and (not checkout.is_dir() or any(checkout.iterdir())):
+        raise RuntimeError(f"Incomplete alpha squad checkout; preserve and repair it before installing: {checkout}")
+    git = shutil.which("git")
+    if git and (source_root / ".git").exists():
+        subprocess.run(
+            [git, "-c", f"submodule.{ALPHA_SQUAD_PATH.as_posix()}.url={ALPHA_SQUAD_REPOSITORY}",
+             "submodule", "update", "--init", "--", ALPHA_SQUAD_PATH.as_posix()],
+            cwd=source_root, check=True,
+        )
+    else:
+        # GitHub source archives omit submodules. Populate the same local path
+        # using the pinned revision, never a moving HEAD.
+        with tempfile.TemporaryDirectory(prefix="oh-my-laya-alpha-") as temporary:
+            downloaded = _download_alpha_squad_skill(Path(temporary), revision=ALPHA_SQUAD_REVISION)
+            _alpha_manifest(downloaded)
+            source.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(downloaded, source)
+    _alpha_manifest(source)
+    return source
 
 
 def _install_alpha_skill_atomically(
@@ -408,6 +440,8 @@ def register_alpha_squad_skill(
     dry_run: bool,
     codex_skills_dir=None,
     agents_skills_dir=None,
+    *,
+    source_root=None,
 ):
     codex_home = Path(os.environ.get("CODEX_HOME") or "~/.codex").expanduser()
     codex_skills = (
@@ -438,13 +472,12 @@ def register_alpha_squad_skill(
     print(f"+ {action} alpha squad skill at {destination}")
     if dry_run:
         return True
-    print("+ fetch latest alpha squad skill")
-    with tempfile.TemporaryDirectory(prefix="oh-my-laya-alpha-") as temporary:
-        source = _download_alpha_squad_skill(Path(temporary))
-        manifest = _alpha_manifest(source)
-        _install_alpha_skill_atomically(
-            source, destination, manifest, state, detail
-        )
+    source = _local_alpha_squad_skill(Path(source_root) if source_root else Path(__file__).resolve().parents[2])
+    print(f"+ use local alpha squad skill at {source}")
+    manifest = _alpha_manifest(source)
+    _install_alpha_skill_atomically(
+        source, destination, manifest, state, detail
+    )
     return True
 
 
@@ -474,10 +507,10 @@ def register_claude(executable: str, server: Path, model_dir: Path, dry_run: boo
 def register_client_skills(source_root, dry_run, client):
     if client == "codex":
         register_advisor_skill(source_root, dry_run)
-        return register_alpha_squad_skill(dry_run)
+        return register_alpha_squad_skill(dry_run, source_root=source_root)
     root = client_home(client) / "skills"
     register_advisor_skill(source_root, dry_run, root)
-    return register_alpha_squad_skill(dry_run, root, root)
+    return register_alpha_squad_skill(dry_run, root, root, source_root=source_root)
 
 
 def configure_goal(client, dry_run):

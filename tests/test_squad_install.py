@@ -10,6 +10,9 @@ import zipfile
 from laya_tell_me.installer import (
     _download_alpha_squad_skill,
     _safe_alpha_archive_extract,
+    _local_alpha_squad_skill,
+    ALPHA_SQUAD_PATH,
+    ALPHA_SQUAD_REVISION,
     register_alpha_squad_skill,
 )
 
@@ -25,7 +28,7 @@ class AlphaSquadInstallTests(unittest.TestCase):
         return source
 
     def install(self, source, codex, agents):
-        with patch("laya_tell_me.installer._download_alpha_squad_skill", return_value=source):
+        with patch("laya_tell_me.installer._local_alpha_squad_skill", return_value=source):
             return register_alpha_squad_skill(False, codex, agents)
 
     def make_archive(self, directory, entries):
@@ -201,7 +204,7 @@ class AlphaSquadInstallTests(unittest.TestCase):
             self.install(source, codex, agents)
             before = (target / "SKILL.md").read_text()
 
-            with patch("laya_tell_me.installer._download_alpha_squad_skill", side_effect=RuntimeError("offline")):
+            with patch("laya_tell_me.installer._local_alpha_squad_skill", side_effect=RuntimeError("offline")):
                 with self.assertRaisesRegex(RuntimeError, "offline"):
                     register_alpha_squad_skill(False, codex, agents)
             self.assertEqual((target / "SKILL.md").read_text(), before)
@@ -212,10 +215,80 @@ class AlphaSquadInstallTests(unittest.TestCase):
                 (target / "SKILL.md").write_text("user edit")
                 return source
 
-            with patch("laya_tell_me.installer._download_alpha_squad_skill", side_effect=concurrent_edit):
+            with patch("laya_tell_me.installer._local_alpha_squad_skill", side_effect=concurrent_edit):
                 with self.assertRaisesRegex(RuntimeError, "changed during download"):
                     register_alpha_squad_skill(False, codex, agents)
             self.assertEqual((target / "SKILL.md").read_text(), "user edit")
+
+    def test_local_submodule_is_used_offline_without_git_or_download(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / ALPHA_SQUAD_PATH / ALPHA_SQUAD_PATH
+            source.mkdir(parents=True)
+            (source / "SKILL.md").write_text("local edit")
+            with patch("laya_tell_me.installer.subprocess.run") as run, \
+                    patch("laya_tell_me.installer.request.urlopen") as download:
+                self.assertEqual(_local_alpha_squad_skill(root), source)
+                self.assertTrue(register_alpha_squad_skill(
+                    False, root / "codex", root / "agents", source_root=root,
+                ))
+            run.assert_not_called()
+            download.assert_not_called()
+            self.assertEqual((root / "codex/alpha-squad-coding-craft/SKILL.md").read_text(), "local edit")
+
+    def test_uninitialized_submodule_uses_https_and_gitlink(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".git").write_text("gitdir: elsewhere")
+            source = root / ALPHA_SQUAD_PATH / ALPHA_SQUAD_PATH
+            def initialize(command, **kwargs):
+                self.assertEqual(kwargs["cwd"], root)
+                self.assertIn("submodule.skills/alpha-squad-coding-craft.url=https://github.com/leo1394/skill-alpha-squad-coding-craft.git", command)
+                self.assertEqual(command[-5:], ["submodule", "update", "--init", "--", ALPHA_SQUAD_PATH.as_posix()])
+                source.mkdir(parents=True)
+                (source / "SKILL.md").write_text("initialized")
+            with patch("laya_tell_me.installer.shutil.which", return_value="git"), \
+                    patch("laya_tell_me.installer.subprocess.run", side_effect=initialize), \
+                    patch("laya_tell_me.installer.request.urlopen") as download:
+                self.assertEqual(_local_alpha_squad_skill(root), source)
+            download.assert_not_called()
+
+    def test_archive_source_populates_local_path_at_pinned_revision(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = self.make_archive(directory, [
+                ("repo/skills/alpha-squad-coding-craft/SKILL.md", "pinned", 0),
+            ])
+            with patch("laya_tell_me.installer.shutil.which", return_value=None), \
+                    patch("laya_tell_me.installer.request.urlopen", return_value=io.BytesIO(archive.read_bytes())) as download:
+                source = _local_alpha_squad_skill(root)
+            self.assertEqual(source, root / ALPHA_SQUAD_PATH / ALPHA_SQUAD_PATH)
+            self.assertEqual((source / "SKILL.md").read_text(), "pinned")
+            self.assertTrue(download.call_args.args[0].endswith("/" + ALPHA_SQUAD_REVISION))
+
+    def test_incomplete_or_symlinked_local_checkout_is_not_overwritten(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / ALPHA_SQUAD_PATH
+            checkout.mkdir(parents=True)
+            (checkout / "keep").write_text("local")
+            with self.assertRaisesRegex(RuntimeError, "Incomplete"):
+                _local_alpha_squad_skill(root)
+            self.assertEqual((checkout / "keep").read_text(), "local")
+            other = root / "linked"
+            (other / "skills").mkdir(parents=True)
+            (other / ALPHA_SQUAD_PATH).symlink_to(checkout, target_is_directory=True)
+            with self.assertRaisesRegex(RuntimeError, "symlinked"):
+                _local_alpha_squad_skill(other)
+
+    def test_archive_revision_matches_submodule_gitlink(self):
+        root = Path(__file__).resolve().parents[1]
+        if not (root / ".git").exists() or not shutil.which("git"):
+            self.skipTest("source archive has no gitlink metadata")
+        entry = subprocess.check_output(
+            ["git", "ls-files", "--stage", ALPHA_SQUAD_PATH.as_posix()], cwd=root, text=True,
+        ).split()
+        self.assertEqual(entry[:2], ["160000", ALPHA_SQUAD_REVISION])
 
 
 if __name__ == "__main__":

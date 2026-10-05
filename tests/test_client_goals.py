@@ -26,7 +26,7 @@ class ClientGoalTests(unittest.TestCase):
                 installer.Client(key, key, key) for key in CLIENTS
             ]))
             stack.enter_context(patch.object(installer, "install_runtime", return_value=(root / "server", root / "model")))
-            stack.enter_context(patch.object(installer, "_download_alpha_squad_skill", return_value=alpha))
+            stack.enter_context(patch.object(installer, "_local_alpha_squad_skill", return_value=alpha))
             commands = stack.enter_context(patch.object(installer, "run"))
             capability_probe = stack.enter_context(patch("laya_tell_me.codex_plugin.subprocess.run"))
             installer.main(["--source-root", str(source), "--targets", "all", "--goal-workflow", "yes",
@@ -117,7 +117,7 @@ class ClientGoalTests(unittest.TestCase):
                         patch.object(installer, "register_alpha_squad_skill") as alpha:
                     installer.register_client_skills(Path("/source"), True, client)
                     advisor.assert_called_once_with(Path("/source"), True, root / "skills")
-                    alpha.assert_called_once_with(True, root / "skills", root / "skills")
+                    alpha.assert_called_once_with(True, root / "skills", root / "skills", source_root=Path("/source"))
 
 
 if __name__ == "__main__":
