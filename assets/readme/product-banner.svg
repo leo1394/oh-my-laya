@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="600" viewBox="0 0 1600 600" role="img" aria-labelledby="title description">
+  <title id="title">Oh My Laya — Reflect. Route. Refine.</title>
+  <desc id="description">Native Laya decisions for your AI agents. Orange return mark on a bright ice-blue field.</desc>
+  <rect width="1600" height="600" rx="28" fill="#edf7ff"/>
+  <path d="M1000 0H1572Q1600 0 1600 28V572Q1600 600 1572 600H1000Z" fill="#dfedfa"/>
+  <path d="M1072 88H1512M1072 512H1512" stroke="#b8cfdf" stroke-width="1"/>
+  <g transform="translate(1032 64) scale(7.5)">
+    <path d="M18 14V40C18 45 21 48 26 48H38C43 48 46 45 46 40C46 35 43 32 38 32H30L46 16" fill="none" stroke="#e85d24" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif">
+    <text x="88" y="105" font-size="18" font-weight="600" letter-spacing="3" fill="#435f72">LOCAL AI INFERENCE. STRUCTURED DECISIONS.</text>
+    <text x="82" y="237" font-size="100" font-weight="750" letter-spacing="-5" fill="#152b38">Oh My Laya</text>
+    <text x="88" y="313" font-size="46" font-weight="500" letter-spacing="-1.5" fill="#e85d24">Reflect. Route. Refine.</text>
+    <text x="88" y="382" font-size="26" fill="#435f72">Native Laya decisions for your AI agents.</text>
+    <path d="M88 453H912" stroke="#c9dce9"/>
+    <text x="88" y="504" font-size="22" fill="#435f72">Codex · Claude Code · DeepSeek Harness · Pi</text>
+  </g>
+</svg>

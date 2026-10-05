@@ -1,230 +1,155 @@
+![Oh My Laya — Reflect. Route. Refine.](assets/readme/product-banner.svg)
+
 # Oh My Laya
 
-[English](README.md) | [中文](README-ZH.md)
+[English](README.md) | [简体中文](README-ZH.md)
 
-Workbench V1 is available as a [prebuilt preview](https://github.com/leo1394/oh-my-laya/releases/tag/v0.2.0-rc.3). The installer verifies and installs it without Rust or Node.js. V1.5 source features below are experimental and are not included in that release.
+**Native Laya decisions for your AI agents.** Integrate [Laya-MLX](https://github.com/mizorewww/laya-mlx) with Codex, Claude Code, DeepSeek Harness (DSH), and pi-agent: keep simple work with the main agent, route useful subtasks within your model limits, and learn from reviewed feedback. Use it for research, analysis, planning, coding, and other agent tasks.
 
-> Oh My Laya — Reflect. Route. Refine.
-
-Oh My Laya builds on [laya-mlx](https://github.com/mizorewww/laya-mlx). It downloads and verifies Hugging Face weights, then registers the `laya_tell_me` tool for classification, scoring, risk routing, and yes/no decisions. Inference runs entirely on your Mac after the model is downloaded.
-
-It supports Codex, Claude Code, DeepSeek Harness (DSH), and pi-agent. The installer detects available clients and lets you select one, several, or all of them.
+- **Reflect.** Get structured classifications, scores, and probabilities directly from local inference—not generated text to parse.
+- **Route.** Pair with [Alpha Squad](https://github.com/leo1394/skill-alpha-squad-coding-craft) to select necessary roles and model/reasoning combinations. Your main model stays unchanged.
+- **Refine.** Preserve first scores, inspect uncertain decisions, and review cases before evaluating and activating them for future advice.
 
 ## Install
 
-Requirements: Apple Silicon, macOS 14+, and Python 3.11+. The default multilingual FP16 checkpoint is approximately 678 MB.
-
-Install and register with all detected clients:
+Apple Silicon Mac · macOS 14+ · Python 3.11+. Install your agent client first. The default multilingual weights are approximately 678 MB; inference runs locally after download.
 
 ```bash
 sh -c "$(curl -fsSL https://raw.githubusercontent.com/leo1394/oh-my-laya/master/tools/oh-my-laya.sh)"
 ```
 
-Without curl, use wget:
+<details>
+<summary>Use wget, or install from a local checkout</summary>
 
 ```bash
 sh -c "$(wget -qO- https://raw.githubusercontent.com/leo1394/oh-my-laya/master/tools/oh-my-laya.sh)"
-```
 
-Install your preferred agent client first; Oh My Laya connects to clients already on your machine.
-
-Already cloned the repository? Run the interactive installer from its root:
-
-```bash
+# Interactive client selection
 ./install.sh
-```
 
-For non-interactive installation:
-
-```bash
+# Choose specific clients, or all detected clients
 ./install.sh --targets codex
 ./install.sh --targets codex,claude
 ./install.sh --targets all
 ```
 
-Both `all` and `both` register every detected client. Restart the affected agent sessions after installation.
+`all` and `both` select every detected client. The installer downloads and verifies the model and installs a prebuilt workbench without requiring Rust or Node.js.
 
-For Codex, installation adds **Oh My Laya** as a local plugin with its logo and MCP tools.
-Open **Plugins → Personal → Oh My Laya**, then start a new task to use it.
-An up-to-date Codex CLI with `plugin add` support is required. Re-run the same installer to update.
-Laya Model Advisor and Alpha Squad remain separately installed Skills; Alpha Squad is installed from the local bundled submodule.
+</details>
 
-Open the local Decision workbench:
+Choose **y** when asked **Use Alpha Squad + Laya with /goal?** to connect the workflow. The installer backs up and updates only the Goal section of your client's global instructions. Choose **n** to leave it unchanged. For unattended setup, add `--goal-workflow yes` or `--goal-workflow no`.
 
-```bash
-laya dashboard
-```
-
-The default address is **http://127.0.0.1:18686**. Run `laya dashboard` to start the service and pair your browser. Use `laya dashboard --port 18687` for a different port. If a service is already running, finish active tasks and run `laya stop` before changing its port; the command never interrupts it automatically.
-
-Start the local Snake demo after installation:
-
-```bash
-laya --snake
-```
-
-Demo dependencies and the installed model are configured automatically. Use `laya --snake --help` for demo options. If the installer reports that the command directory is missing from PATH, follow its displayed PATH instruction once.
-
-For each selected client, the installer asks **Use Alpha Squad + Laya with /goal? [y/N]**.
-Choose `y` to add the Goal workflow to that client's global instructions, using actual
-installed skill paths. Existing Goal rules are backed up and replaced; other
-sections are preserved. Choose `n` to leave global instructions unchanged.
-
-For unattended installation, choose explicitly:
-
-```bash
-./install.sh --targets all --goal-workflow yes
-# Or leave global instructions unchanged:
-./install.sh --targets all --goal-workflow no
-```
-
-| Client | Default global instructions |
-| --- | --- |
-| Codex | `~/.codex/AGENTS.md` |
-| Claude Code | `~/.claude/CLAUDE.md` |
-| DSH | `~/.dsh/AGENTS.md` |
-| pi-agent | `~/.pi/agent/AGENTS.md` |
-
-Custom client home directories are respected. After opting in, start a new session
-and use `/goal` for a task. Codex, Claude Code and DSH keep their native Goal
-implementation (the installed version/profile must support it). Pi gets a `/goal`
-prompt template, **not a persistent Goal loop**; conflicting custom prompts are
-preserved and reported. Model selection and delegation require the host's verified
-capabilities; unavailable features need an explicit manual fallback. Without an
-interactive terminal, global rules are unchanged unless explicitly opted in.
+Restart your agent session after installation. In Codex, find **Plugins → Personal → Oh My Laya** and start a new task. Codex needs a CLI with `plugin add` support. The advisor and Squad are installed as separate Skills; existing unmanaged or locally modified Skills are preserved.
 
 ## Use It
 
 ### Start with a goal
 
-Enabled `/goal` integration during installation? Open a new Codex session, enter
-Goal mode with `/goal`, and give Codex a task:
+After enabling Goal integration, enter `/goal` and describe the result you want:
 
 ```text
 Add search to this project, cover it with tests, and review the changes.
+Use Alpha Squad with Laya's structured orchestration. Check compatibility first;
+keep my main model, authorization ceilings, and recording settings unchanged.
 ```
 
-1. **Confirm your strategy.** On first setup, one window collects your Laya policy, execution model and reasoning ceiling, reviewer configuration, and final **Confirm and continue**. Choose automatic recommendations for hands-off subagent routing; saved settings are revalidated on later tasks.
-2. **Let Codex split the work.** Alpha Squad coordinates exploration, implementation, testing, research, and review as needed. Small tasks can stay with the main agent.
-3. **Let Laya guide subagent assignments.** Laya assesses the work; Alpha Squad applies accepted model/effort recommendations through the host. Automatic execution routing uses only your selected model, at or below your reasoning ceiling. The main session's model stays unchanged.
-4. **Complete and review together.** Subagents return focused results to the main agent, which integrates and verifies the work. Difficult, high-risk, or uncertain reviews use the main session's model/effort; ordinary reviews use your configured reviewer.
+1. **Confirm your limits.** Choose a recommendation policy, execution model/reasoning ceiling, and reviewer configuration. Submit **Confirm and continue**; saved choices are revalidated on later tasks.
+2. **Decide before dividing.** Clear, low-risk local work can stay with the main agent. Useful independent work gets only the necessary roles. Missing information triggers clarification—not more agents.
+3. **Execute within bounds.** Squad applies accepted assignments through the host, using focused context and bounded repair/upgrade attempts. Required review and execution approvals still apply.
+4. **Keep the evidence.** With recording authorized, save first scores as they arrive; link later test/reviewer feedback, actual model settings, and available usage without overwriting them. Review uncertain or problematic cases in the workbench.
 
 ```mermaid
 flowchart TD
-    goal["/goal + your task"] --> setup["Confirm policy, models and ceilings"]
-    setup --> lead["Orchestrator: current model unchanged"]
-    lead --> split{"Delegate useful subtasks?"}
-    split -->|"No"| solo["Main agent handles task"]
-    split -->|"Yes"| laya["Local Laya: assess and recommend"]
-    laya --> route["Alpha Squad: apply policy and verified assignments"]
-    subgraph squad ["Execution roles — only as needed, within your model / effort ceiling"]
-        explorer["Explorer: map code"]
-        researcher["Researcher: verify facts"]
-        worker["Worker: implement"]
-        tester["Tester: validate"]
-    end
-    route --> explorer & researcher & worker & tester
-    explorer & researcher & worker & tester --> merge["Orchestrator: integrate results"]
-    merge --> review["Reviewer: configured model; main model for difficult reviews"]
-    review --> verify["Orchestrator: verify and deliver"]
-    solo --> verify
+    goal["/goal + your task"] --> limits["Confirm policy and model limits"]
+    limits --> assess["Local Laya: assess task and constraints"]
+    assess --> plan{"Structured plan"}
+    plan -->|"direct"| direct["Main agent works; no optional child"]
+    plan -->|"needs_context"| clarify["Clarify missing evidence"]
+    clarify --> assess
+    plan -->|"delegate"| squad["Only necessary roles; authorized model / effort"]
+    squad --> work["Focused context; bounded attempts; required review"]
+    direct --> verify["Main agent verifies and delivers"]
+    work --> verify
+    work -.->|"Recording authorized"| feedback["First scores now; outcomes and usage as available"]
+    direct -.->|"Recording authorized"| feedback
+    feedback --> study["Human review → evaluate → explicitly activate cases"]
+    study -.->|"Future advice"| assess
 ```
 
-Roles show responsibilities, not a fixed parallel schedule. Alpha Squad orders
-dependent work and requests confirmation when your policy requires it.
+**Loading Squad does not mean spawning a squad.** `direct` clears optional spawn parameters. Low complexity alone does not remove a required reviewer or other explicit obligations. These are advisory controls consumed by the host, not a hard interceptor for every native agent call.
 
-**Designed to reduce token waste:** local Laya handles lightweight routing decisions,
-while focused subtasks and bounded reasoning help avoid unnecessary large-model
-work. Actual token savings depend on the task; subagent coordination adds overhead,
-so delegation is used only when useful. Model choice alone does not guarantee fewer tokens.
+Structured orchestration is opt-in and requires compatible installed tools and the companion Skill. The agent checks support and reports fallback rather than claiming the policy ran. To disable it, ask the agent to stop structured orchestration; recorded feedback is retained. For a local build, see [Development](#development).
 
-The confirmation window and model assignments require host support. Execution
-approvals still apply; this workflow does not grant permission for sensitive actions.
+Execution roles include explorer, researcher, worker, and tester—only when needed. Difficult, high-risk, or uncertain reviews use the main session's model/effort; ordinary reviews use your configured reviewer. Automatic advice stays within the selected model and reasoning ceiling; tier mappings never expand authorization.
+
+**Designed to reduce wasted tokens, not promise a percentage.** Avoid unnecessary delegation, repeated context, and unproductive retries. Coordination itself costs tokens; a cheaper model is not necessarily a lower-token solution. Actual savings depend on the task and quality of the outcome.
+
+Host capabilities vary: Codex, Claude Code, and DSH need a compatible Goal implementation/profile. Pi uses a `/goal` prompt template, not a persistent Goal loop. Popups and subagent assignments require host support; missing capabilities are reported.
 
 ### Ask Laya directly
 
-For a standalone decision without the squad workflow:
+Ask your agent:
 
 ```text
-Use Laya to classify the current change as low, medium, or high risk, and decide whether human review is needed.
+Use Laya to classify this change as low, medium, or high risk.
+Show the structured result; do not modify any files.
 ```
-
-Oh My Laya provides these tools:
 
 | Tool | Purpose |
 | --- | --- |
-| `laya_tell_me` | `choice` classification, `score` ranking, and `noul` yes/no probability |
-| `laya_advisor_preferences` | Read or change model recommendation preferences |
-| `laya_feedback` | Save authorized execution feedback and its original first score |
+| `laya_tell_me` | Structured classification, scoring, yes/no probability, and model advice |
+| `laya_advisor_preferences` | Read or change recommendation preferences |
+| `laya_feedback` | Save authorized feedback, including original first scores |
 
-Laya does not generate code and must not authorize destructive, publishing, or other consequential actions. The multilingual model has a total context budget of 1,024 tokens, so ask the agent to summarize long inputs first.
+For session-level advice, ask: **“Use `$laya-model-advisor` for each new task; let me choose a recommendation policy.”** Choose always ask, ask for high complexity/risk/uncertainty, or automatic advice within your selected model/effort ceiling. Accepting advice does not switch the main session model or authorize execution.
 
-## Codex Model Advisor
+Laya does not generate code. Keep decision inputs concise: the multilingual checkpoint has a total context budget of 1,024 tokens. Preserve relevant constraints when summarizing.
 
-Each selected client gets the advisor skill and the bundled
-[Alpha Squad](https://github.com/leo1394/skill-alpha-squad-coding-craft) version from the local `skills/alpha-squad-coding-craft` submodule. The installer initializes missing sources automatically.
-Existing unmanaged or locally modified Alpha Squad installations are preserved.
-Restart the client. In Codex, ask:
-
-```text
-Use $laya-model-advisor for each new task in this session. Ask me to choose a recommendation policy.
-```
-
-Choose **always ask**, **ask only for high complexity, high risk or uncertainty**, or **automatically accept recommendations**. You can change this preference in chat at any time; it persists across sessions. When asking, the advisor lists verified available models and lets you choose a model and its supported reasoning effort. Without a user-defined model tier mapping, it recommends effort changes on the current model; you can still choose another listed model.
-
-This is advisory: accepting a recommendation does **not** switch the active model. Apply it in Codex's model picker. Popups require host support; otherwise the agent asks in chat. Session advice is skill-driven, not a guaranteed per-message hook. If the model list cannot be verified, the advisor asks you to provide it. These preferences never bypass execution approvals.
-
-Setup uses one window: policy → model → reasoning → **Confirm and continue**. In automatic mode, model and effort are still required: advice stays on the selected model and never exceeds the selected effort ceiling (proposed default: `high`). Locally disabled efforts remain hidden. Existing automatic preferences without a ceiling require setup again.
-
-### Route subagent models
-
-```text
-Use $alpha-squad-coding-craft with $laya-model-advisor. Configure Laya-based subagent routing.
-```
-
-One window configures policy, execution model/effort, reviewer model/effort, and
-**Confirm and continue**. The main session stays unchanged. Execution agents use
-Laya's accepted recommendations; auto stays within your chosen model and effort
-ceiling. Difficult, high-risk or uncertain reviews use the main session's exact
-model/effort; ordinary reviews use the configured reviewer. Alpha Squad assigns
-subagent models through the host, not through a main-session model switch.
-
-Without Laya, Alpha Squad still works with manual model selection in one window.
-Rerun the installer to fetch upstream updates; local customizations are never
-silently overwritten. A network failure is reported, not treated as an update.
-
-## Common Options
+Try the local Snake demo:
 
 ```bash
-# Select another checkpoint
-./install.sh --targets all --model english
-./install.sh --targets dsh --model typed-decisions
-
-# Preview without downloading or changing configuration
-./install.sh --targets codex --dry-run
+laya --snake
 ```
 
-The default installation directory is `~/.local/share/oh-my-laya/`. Each agent starts its own lazy MCP process; concurrent callers each consume a separate unified-memory allocation.
+Dependencies and the model path are configured during installation. Use `laya --snake --help` for options.
 
-## V1.5 preview: try it, turn it off, recover
+## See decisions. Improve the next one.
 
-Use a matching source-built bridge/service/worker and companion Skill before trying V1.5. The released rc.3 installer does not enable it. Ask your agent:
-
-```text
-For this task, use Alpha Squad with Laya's opt-in structured orchestration.
-Check compatibility first; keep my model, authorization ceilings and recording settings unchanged.
+```bash
+laya dashboard
 ```
 
-The agent supplies the versioned `orchestration` context with `enabled: true`; you do not enter run IDs. Unsupported peers report a fallback. To stop the trial, ask the agent to omit `orchestration` on later calls (or set its `enabled` field to `false`). This returns to V1 routing without deleting feedback. Budgeted case injection needs its own compatible evaluation and explicit activation; existing case approvals are not silently upgraded.
+The workbench runs at **http://127.0.0.1:18686**. The command starts the service and pairs your browser. Use `--port 18687` to choose another port; stop an existing service with `laya stop` before changing it.
 
-An upgrade creates a private `pre-migration-*` snapshot. Find newly created snapshots in **Settings → Backup & export**. **Restore** recovers that data snapshot into the current schema, preserves privacy deletions, and creates a safety backup of the state being replaced. It does not merge later records or downgrade the binary. Do not point an older binary at a newer database; binary rollback requires a stopped service and a compatible verified backup, including external evidence. Older, unlisted migration archives are not automatically imported.
+![Decision workbench overview with illustrative sample data](assets/readme/dashboard-en.png)
 
-Token figures remain estimates or explicitly scoped actual usage. Comparative efficiency evaluation is pending separate approval; no token-saving percentage is proven. The preview does not authorize model calls, collection, installation changes or publishing.
+*Actual workbench UI with synthetic demonstration data—not measured product savings or personal usage.*
+
+- **Overview:** scenario-estimated token savings alongside recorded actual usage, model assignments, review signals, and coverage. Filter today, 7 days, 30 days, or a custom range.
+- **Case study:** inspect uncertain decisions and original Squad feedback, correct labels, and prepare reviewed learning cases. The Overview time range carries over.
+- **Settings:** configure low/medium/high model combinations, control recording, and manage backups. English and Chinese are available.
+
+Estimates are not measured savings; incomplete usage stays marked as partial, and negative estimates remain visible. First scores are preserved alongside later corrections. Cases inform future decisions only after evaluation and explicit activation—collection is not automatic weight training.
+
+## Update and recover
+
+Rerun the installer to update; local customizations are not silently overwritten. The companion Skill comes from the repository's pinned submodule. Default installation: `~/.local/share/oh-my-laya/`.
+
+Database upgrades create a private backup. Find new migration snapshots in **Settings → Backup & export**. Restoring recovers that snapshot, honors privacy deletions, and saves the replaced state; it does not merge newer records or downgrade the program. Stop the service and use a compatible backup before a binary rollback.
 
 ## Development
 
+To install a local source build, build the frontend and workbench, then pass the binary to the installer. Requires Node.js and Rust locally:
+
 ```bash
+(cd web && npm ci && npm run build)
+cargo build --locked --release -p laya
+./install.sh --targets codex --workbench-binary "$PWD/target/release/laya"
+
+# Tests
 PYTHONPATH=src python3 -m unittest discover -s tests -v
+cargo test --locked -p laya
+(cd web && npm test)
 ```
 
 Licensed under the [MIT License](LICENSE).

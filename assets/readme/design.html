@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Oh My Laya — Product banner</title>
+  <style>
+    /* Editable brand tokens. The approved symbol geometry remains unchanged. */
+    :root { --ice: #edf7ff; --panel: #dfedfa; --accent: #e85d24; --ink: #152b38; --muted: #435f72; --line: #c9dce9; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 32px; background: #fff; color: var(--ink); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; }
+    header { display: flex; justify-content: space-between; align-items: center; gap: 20px; margin-bottom: 24px; }
+    header p, footer { font-size: 14px; color: var(--muted); line-height: 1.6; }
+    a { color: var(--ink); }
+    a:focus-visible { outline: 3px solid var(--accent); outline-offset: 4px; }
+    .artboard { container-type: inline-size; max-width: 1600px; margin: auto; }
+    .banner { aspect-ratio: 8 / 3; display: grid; grid-template-columns: 5fr 3fr; background: var(--ice); border-radius: 1.75cqw; overflow: hidden; }
+    .copy { padding: 4.9cqw 5.5cqw; }
+    .eyebrow { margin: 0; font-size: 1.125cqw; font-weight: 600; letter-spacing: .19cqw; color: var(--muted); }
+    h1 { margin: 4cqw 0 1.05cqw; font-size: 6.25cqw; font-weight: 750; letter-spacing: -.31cqw; line-height: 1; }
+    .slogan { margin: 0; font-size: 2.875cqw; letter-spacing: -.094cqw; color: var(--accent); }
+    .description { margin: 2.8cqw 0 4cqw; font-size: 1.625cqw; color: var(--muted); }
+    .clients { border-top: 1px solid var(--line); padding-top: 2cqw; margin: 0; font-size: 1.375cqw; color: var(--muted); }
+    .symbol { display: grid; place-items: center; background: var(--panel); position: relative; }
+    .symbol::before, .symbol::after { content: ''; position: absolute; left: 12%; right: 15%; height: 1px; background: #b8cfdf; }
+    .symbol::before { top: 14.7%; } .symbol::after { bottom: 14.7%; }
+    .symbol svg { width: 80%; }
+    footer { max-width: 1600px; margin: 24px auto 0; }
+    @media (max-width: 600px) { body { padding: 12px; } header { align-items: start; flex-direction: column; gap: 0; } }
+  </style>
+</head>
+<body>
+  <header><p>Product banner · 1600 × 600 master · editable HTML</p><a href="#provenance">Source and usage</a></header>
+  <main class="artboard" id="product-banner" aria-label="Oh My Laya product banner">
+    <section class="banner">
+      <div class="copy">
+        <p class="eyebrow">LOCAL AI INFERENCE. STRUCTURED DECISIONS.</p>
+        <h1>Oh My Laya</h1>
+        <p class="slogan">Reflect. Route. Refine.</p>
+        <p class="description">Native Laya decisions for your AI agents.</p>
+        <p class="clients">Codex · Claude Code · DeepSeek Harness · Pi</p>
+      </div>
+      <div class="symbol"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Oh My Laya return mark"><path d="M18 14V40C18 45 21 48 26 48H38C43 48 46 45 46 40C46 35 43 32 38 32H30L46 16" fill="none" stroke="#e85d24" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+    </section>
+  </main>
+  <footer id="provenance">Existing Oh My Laya return mark: unchanged path and orange, scaled uniformly. Ice-blue framing echoes the workbench sidebar. Edit colors in :root and copy in the semantic HTML. Static brand artwork; no simulated metrics, external assets, fonts, or network requests.</footer>
+  <script>document.documentElement.dataset.artifact = 'oh-my-laya-product-banner';</script>
+</body>
+</html>
