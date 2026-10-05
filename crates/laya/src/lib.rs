@@ -9,6 +9,9 @@ pub mod service;
 pub mod assets;
 pub mod evaluation;
 pub mod scenario;
+pub(crate) mod execution;
+pub(crate) mod usage;
+pub(crate) mod efficiency;
 
 #[cfg(test)]
 mod fault_tests;

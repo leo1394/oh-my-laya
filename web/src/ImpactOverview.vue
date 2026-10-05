@@ -9,6 +9,19 @@ const tokens = computed(() => dashboard.value?.tokens)
 const learning = computed(() => dashboard.value?.learning)
 const number = (value) => value == null ? '—' : Number(value).toLocaleString(locale.value)
 const finiteNumber = (value) => typeof value === 'number' && Number.isFinite(value)
+const efficiency = computed(() => {
+  const value = dashboard.value?.efficiency
+  const counts = ['observed_attempts', 'reported_runs', 'versioned_attempts', 'identity_conflicts', 'delegated_attempts', 'repair_attempts', 'upgrade_attempts', 'initial_scored_attempts', 'flagged_attempts', 'usage_covered_attempts', 'usage_missing_attempts']
+  if (value?.contract !== 'efficiency_summary_v1' || value.scope !== 'recorded_attempts' || value.complete_task_coverage !== false) return null
+  if (!counts.every(key => Number.isSafeInteger(value[key]) && value[key] >= 0)) return null
+  if (!counts.every(key => value[key] <= value.observed_attempts)) return null
+  if (value.usage_covered_attempts + value.usage_missing_attempts !== value.observed_attempts) return null
+  const outcomes = value.reported_outcomes
+  if (!outcomes || !Object.keys(outcomes).every(key => ['success', 'failure', 'partial', 'cancelled', 'unknown'].includes(key))) return null
+  if (!Object.values(outcomes).every(count => Number.isSafeInteger(count) && count >= 0)) return null
+  if (Object.values(outcomes).reduce((total, count) => total + count, 0) !== value.observed_attempts) return null
+  return value
+})
 const validRange = (value) => value && finiteNumber(value.low) && finiteNumber(value.central) && finiteNumber(value.high) && value.low <= value.central && value.central <= value.high
 const scenario = computed(() => {
   const value = tokens.value?.scenario
@@ -94,16 +107,27 @@ const reasonLabel = (reason) => ({
     <div class="learning-overview">
       <article>
         <h3>{{ t('How work was assigned', '任务分配到了哪里') }}</h3>
+        <template v-if="efficiency">
+          <p><b>{{ number(efficiency.reported_runs) }}</b> {{ t('reported runs in this date range · not complete task coverage', '个当前时间范围内已上报运行 · 不代表完整任务覆盖') }}</p>
+          <p><b>{{ number(efficiency.observed_attempts) }}</b> {{ t('recorded attempts', '次已记录执行') }} · <b>{{ number(efficiency.delegated_attempts) }}</b> {{ t('delegated', '次委派') }}</p>
+          <p>{{ number(efficiency.repair_attempts) }} {{ t('repair attempts', '次修复尝试') }} · {{ number(efficiency.upgrade_attempts) }} {{ t('upgrade attempts', '次升级尝试') }}</p>
+          <small>{{ t('Only recorded attempts in this date range; missing agents or runs are not counted as zero.', '仅统计当前时间范围的已记录执行；未采集的代理或任务不按零计算。') }}</small>
+        </template>
         <p v-if="!dashboard?.execution_models?.length">{{ t('No verified execution distribution yet.', '暂无执行模型分布记录。') }}</p>
         <div v-for="(item, index) in (dashboard?.execution_models || []).slice(0, 5)" :key="index" class="model-count"><span>{{ item.model || t('Unverified model', '未核实模型') }} / {{ item.reasoning_effort || '—' }}</span><b>{{ number(item.attempts) }} {{ t('attempts', '次执行') }}</b></div>
         <small>{{ t('Top 5 recorded combinations; distribution alone does not prove better task decomposition or quality.', '已记录搭配前 5 项；分配次数本身不能证明拆分更合理或质量更高。') }}</small>
       </article>
       <article>
         <h3>{{ t('Turn uncertainty into learning cases', '把不明确判断沉淀为学习案例') }}</h3>
+        <template v-if="efficiency">
+          <p>{{ number(efficiency.initial_scored_attempts) }} {{ t('with initial scores', '次执行有首次评分') }} · {{ number(efficiency.flagged_attempts) }} {{ t('with review signals', '次执行存在复核信号') }}</p>
+          <small>{{ t('Usable usage evidence', '可用用量证据') }}: {{ number(efficiency.usage_covered_attempts) }} / {{ number(efficiency.observed_attempts) }} · {{ t('Recorded attempts, not complete task coverage.', '仅已记录执行，不代表完整任务覆盖。') }}</small>
+          <details><summary>{{ t('Execution evidence', '执行证据') }}</summary><p>{{ number(efficiency.reported_outcomes.success ?? 0) }} {{ t('reported successful', '次上报成功') }} · {{ number(efficiency.reported_outcomes.failure ?? 0) }} {{ t('failed', '次失败') }} · {{ number(efficiency.reported_outcomes.partial ?? 0) }} {{ t('partial', '次部分完成') }} · {{ number(efficiency.reported_outcomes.cancelled ?? 0) }} {{ t('cancelled', '次取消') }} · {{ number(efficiency.reported_outcomes.unknown ?? 0) }} {{ t('without a known versioned outcome', '次缺少明确的版本化结果') }}</p><p>{{ number(efficiency.identity_conflicts) }} {{ t('identity conflicts', '处执行标识冲突') }}</p><p>{{ t('Review signals use the existing review rules, including original low scores and later corrections. They do not establish a training label or prove efficiency.', '复核信号沿用现有规则，包含原始低评分及后续纠正；它们不是训练标签，也不能证明效率提升。') }}</p></details>
+        </template>
         <p><b>{{ number(learning?.uncertain_pending) }}</b> {{ t('uncertain', '待复核的不明确判断') }} · <b>{{ number(learning?.uncertain_with_problem_pending) }}</b> {{ t('also have problem scores', '同时存在问题评分') }}</p>
         <p>{{ number(learning?.reviewer_corrections_pending) }} {{ t('await reviewer-correction review', '个审核纠正待复核') }} · {{ number(learning?.reviewed_cases) }} {{ t('reviewed cases', '个已复核案例') }} · {{ number(learning?.evaluated_versions) }} {{ t('evaluated versions', '个已评估版本') }}</p>
         <small>{{ t('Reviewed cases follow decision dates; the evaluated-version count follows version creation dates.', '已复核案例按决策时间统计；已评估版本数按版本创建时间统计。') }}</small>
-        <div class="form-actions"><button class="button primary" @click="$emit('review')">{{ t('Review priority cases', '复核重点案例') }}</button><button class="button subtle" @click="$emit('cases')">{{ t('Case study', '学习案例库') }}</button></div>
+        <div class="form-actions"><button class="button primary" @click="$emit('review')">{{ t('Review priority cases', '复核重点案例') }}</button><button class="button subtle" @click="$emit('cases')">{{ t('Case study', '案例学习') }}</button></div>
         <small>{{ t('Review → evaluate → activate memory. Cases can inform later advice; collection is not training or proof of improvement.', '复核 → 评估 → 启用记忆，为后续决策提供案例。采集不等于训练，也不代表能力已经提升。') }}</small>
       </article>
     </div>

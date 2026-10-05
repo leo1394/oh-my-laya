@@ -16,5 +16,7 @@ tests/*
 !tests/fixtures/
 tests/fixtures/*
 !tests/fixtures/workbench_worker.py
+!tests/fixtures/v15-evaluation/
+!tests/fixtures/v15-evaluation/**
 integrations/pi/node_modules/
 /docs/

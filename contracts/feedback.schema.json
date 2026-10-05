@@ -133,6 +133,7 @@
       "additionalProperties": false,
       "required": ["recommended", "selected", "requested", "effective", "reason", "evidence_refs"],
       "properties": {
+        "execution": {"$ref": "#/$defs/dispatchReceipt"},
         "recommended": {"oneOf": [{"$ref": "#/$defs/assignmentPair"}, {"type": "null"}]},
         "selected": {"oneOf": [{"$ref": "#/$defs/assignmentPair"}, {"type": "null"}]},
         "requested": {"oneOf": [{"$ref": "#/$defs/assignmentPair"}, {"type": "null"}]},
@@ -168,11 +169,68 @@
     },
     "outcomePayload": {
       "type": "object", "additionalProperties": false,
+      "allOf": [
+        {"if": {"required": ["execution"]}, "then": {"anyOf": [{"required": ["outcome"]}, {"required": ["status"]}]}},
+        {"if": {"required": ["execution"], "properties": {"execution": {"properties": {"result": {"const": "success"}}}}}, "then": {"properties": {"outcome": {"const": "success"}, "status": {"const": "success"}}}},
+        {"if": {"required": ["execution"], "properties": {"execution": {"properties": {"result": {"const": "failure"}}}}}, "then": {"properties": {"outcome": {"const": "failure"}, "status": {"const": "failure"}}}},
+        {"if": {"required": ["execution"], "properties": {"execution": {"properties": {"result": {"const": "partial"}}}}}, "then": {"properties": {"outcome": {"const": "partial"}, "status": {"const": "partial"}}}},
+        {"if": {"required": ["execution"], "properties": {"execution": {"properties": {"result": {"const": "cancelled"}}}}}, "then": {"properties": {"outcome": {"const": "cancelled"}, "status": {"const": "cancelled"}}}},
+        {"if": {"required": ["execution"], "properties": {"execution": {"properties": {"result": {"const": "unknown"}}}}}, "then": {"properties": {"outcome": {"const": "unknown"}, "status": {"const": "unknown"}}}}
+      ],
       "properties": {
+        "execution": {"$ref": "#/$defs/attemptOutcome"},
         "outcome": {"enum": ["success", "failure", "partial", "cancelled", "unknown"]}, "status": {"enum": ["success", "failure", "partial", "cancelled", "unknown"]},
         "summary": {"type": "string", "minLength": 1, "maxLength": 8192}, "failure_reason": {"type": ["string", "null"], "minLength": 1, "maxLength": 8192},
         "scores": {"$ref": "#/$defs/common/scores"}, "reason": {"$ref": "#/$defs/common/reason"}, "evidence_refs": {"$ref": "#/$defs/common/evidence_refs"}
       }
+    },
+    "executionIdentity": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "\\S"},
+    "executionNullableReference": {"type": ["string", "null"], "minLength": 1, "maxLength": 512, "pattern": "\\S"},
+    "executionEventReferences": {"type": "array", "maxItems": 32, "uniqueItems": true, "items": {"$ref": "#/$defs/executionIdentity"}},
+    "dispatchReceipt": {
+      "type": "object", "additionalProperties": false,
+      "required": ["contract", "run_id", "stage_id", "ordinal", "policy_version", "enforcement", "role", "attempt_kind", "status", "native_execution_ref", "context_isolation", "context_evidence_ref", "input_size"],
+      "properties": {
+        "contract": {"const": "dispatch_receipt_v1"},
+        "role": {"enum": ["orchestrator", "explorer", "worker", "tester", "researcher", "reviewer"], "description": "Execution role, distinct from the envelope's reporting source.role."},
+        "run_id": {"$ref": "#/$defs/executionIdentity"}, "stage_id": {"$ref": "#/$defs/executionIdentity"},
+        "ordinal": {"type": "integer", "minimum": 1, "maximum": 1000000, "description": "Observed ordinal; values above the automatic budget remain evidence, not permission."},
+        "policy_version": {"const": "bounded-attempts-v1"}, "enforcement": {"const": "advisory"},
+        "attempt_kind": {"enum": ["initial", "repair", "upgrade", "manual"]}, "status": {"enum": ["started", "failed", "unknown"]},
+        "native_execution_ref": {"$ref": "#/$defs/executionNullableReference"},
+        "context_isolation": {"enum": ["isolated", "unsupported", "unknown"]},
+        "context_evidence_ref": {"$ref": "#/$defs/executionNullableReference"},
+        "input_size": {
+          "type": "object", "additionalProperties": false, "required": ["value", "unit", "source"],
+          "properties": {
+            "value": {"type": ["integer", "null"], "minimum": 0},
+            "unit": {"enum": ["native_tokens", "bytes", "characters", "unknown"]},
+            "source": {"$ref": "#/$defs/executionNullableReference"}
+          },
+          "allOf": [{"if": {"properties": {"value": {"type": "integer"}}}, "then": {"properties": {"unit": {"enum": ["native_tokens", "bytes", "characters"]}, "source": {"type": "string"}}}}]
+        }
+      },
+      "allOf": [
+        {"if": {"properties": {"status": {"const": "started"}}}, "then": {"properties": {"native_execution_ref": {"type": "string"}}}},
+        {"if": {"properties": {"context_isolation": {"const": "isolated"}}}, "then": {"properties": {"context_evidence_ref": {"type": "string"}}}}
+      ]
+    },
+    "attemptOutcome": {
+      "type": "object", "additionalProperties": false,
+      "required": ["contract", "run_id", "stage_id", "ordinal", "policy_version", "enforcement", "dispatch_event_id", "result", "failure_class", "first_feedback_event_id", "test_event_ids", "review_event_ids", "usage_event_ids", "duration_ms"],
+      "properties": {
+        "contract": {"const": "attempt_outcome_v1"},
+        "run_id": {"$ref": "#/$defs/executionIdentity"}, "stage_id": {"$ref": "#/$defs/executionIdentity"},
+        "ordinal": {"type": "integer", "minimum": 1, "maximum": 1000000},
+        "policy_version": {"const": "bounded-attempts-v1"}, "enforcement": {"const": "advisory"},
+        "dispatch_event_id": {"$ref": "#/$defs/executionIdentity"},
+        "result": {"enum": ["success", "failure", "partial", "cancelled", "unknown"]},
+        "failure_class": {"enum": [null, "acceptance", "capability", "infrastructure", "authorization", "risk", "user_decision", "cancelled", "unknown"]},
+        "first_feedback_event_id": {"type": ["string", "null"], "minLength": 1, "maxLength": 128, "pattern": "\\S"},
+        "test_event_ids": {"$ref": "#/$defs/executionEventReferences"}, "review_event_ids": {"$ref": "#/$defs/executionEventReferences"}, "usage_event_ids": {"$ref": "#/$defs/executionEventReferences"},
+        "duration_ms": {"type": ["integer", "null"], "minimum": 0}
+      },
+      "allOf": [{"if": {"properties": {"result": {"const": "success"}}}, "then": {"properties": {"failure_class": {"type": "null"}}}}]
     },
     "userChoicePayload": {
       "type": "object", "additionalProperties": false,

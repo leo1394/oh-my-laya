@@ -11,9 +11,12 @@ const MIGRATION_1: &str = include_str!("../../../migrations/0001_workbench.sql")
 const MIGRATION_2: &str = include_str!("../../../migrations/0002_evidence.sql");
 const MIGRATION_3: &str = include_str!("../../../migrations/0003_case_applicability.sql");
 const MIGRATION_4: &str = include_str!("../../../migrations/0004_case_lineage.sql");
+const MIGRATION_5: &str = include_str!("../../../migrations/0005_efficiency_indexes.sql");
 const MAX_FEEDBACK_BYTES: usize = 16 * 1024;
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 pub const EVALUATOR_IDENTITY: &str = "laya-advisor-evaluator-v3";
+pub const BUDGET_EVALUATOR_IDENTITY: &str = "laya-advisor-evaluator-v4";
+pub const MEMORY_INPUT_POLICY: &str = "whole-case-token-budget-v1";
 pub const RETRIEVAL_POLICY_VERSION: &str = "routing-family-lineage-v1";
 const MAX_UNRECORDED_IDS: usize = 4096;
 
@@ -95,11 +98,13 @@ impl Database {
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         if version > SCHEMA_VERSION { bail!("invalid: database schema {} is newer than supported {}", version, SCHEMA_VERSION); }
         if version < SCHEMA_VERSION {
-            if had_database {
-                let migration_path = root.join("backups").join(format!("pre-migration-{}.sqlite3",uuid::Uuid::new_v4()));
+            let migration_backup = if had_database {
+                let id = format!("pre-migration-{}",uuid::Uuid::new_v4());
+                let migration_path = root.join("backups").join(format!("{id}.sqlite3"));
                 create_archive(&connection,&root,&migration_path)?;
-            }
-            migrate(&connection)?;
+                Some((id,file_hash(&migration_path)?))
+            } else { None };
+            migrate_with_backup(&connection,migration_backup.as_ref())?;
         }
         connection.execute("UPDATE settings SET value_json=json_set(value_json,'$.replay_enabled',json('true')) WHERE json_type(value_json,'$.replay_enabled') IS NULL",[])?;
         connection.execute("UPDATE jobs SET status='interrupted', updated_at=?1 WHERE status IN('running','queued')", [now()])?;
@@ -329,6 +334,7 @@ impl Database {
         detail.insert("model_observations".into(), Value::Array(model_observations));
         let mut detail = Value::Object(detail);
         attach_triage(&self.connection,&mut detail)?;
+        detail["efficiency_observations"]=json!(crate::efficiency::observe(&self.connection,&detail,detail["feedback"].as_array().unwrap(),&crate::efficiency::reused_streams(&self.connection)?)?);
         Ok(detail)
     }
 
@@ -370,6 +376,7 @@ impl Database {
             _ => {}
         }
         if map["kind"] == "run_manifest" { validate_run_manifest_references(&self.connection,map)?; }
+        crate::execution::validate_references(&self.connection,&event)?;
         let payload = map.get("payload").unwrap();
         let source = map.get("source").unwrap();
         let attempt_ref = map.get("attempt_ref").and_then(Value::as_str);
@@ -582,7 +589,7 @@ impl Database {
         if invalidated { bail!("invalid: version {id} is invalidated"); }
         if evaluation != "passed" { bail!("invalid: version {id} has not passed evaluation"); }
         let report=parse_json(report.as_deref().unwrap_or("null"))?;
-        if report["evaluator_identity"]!=EVALUATOR_IDENTITY || report["retrieval_policy_version"]!=RETRIEVAL_POLICY_VERSION || report["candidate_memory_exposure"].as_u64().unwrap_or(0)==0 {
+        if !evaluation_report_compatible(&report) {
             bail!("invalid: version {id} evaluation is incompatible with the current retrieval policy");
         }
         let missing: i64 = transaction.query_row("SELECT COUNT(*) FROM memory_version_cases mvc LEFT JOIN cases c ON c.id=mvc.case_id AND c.deleted_at IS NULL AND c.active=1 WHERE mvc.version_id=?1 AND c.id IS NULL", [&id], |row| row.get(0))?;
@@ -597,7 +604,9 @@ impl Database {
 
     fn memory_retrieve(&self, value: Value) -> Result<Value> {
         let map = object(&value, "memory retrieve")?;
-        allowed(map, &["query", "version", "exclude_ids", "exclude_task_families", "configuration", "evaluation"])?;
+        allowed(map, &["query", "version", "exclude_ids", "exclude_task_families", "configuration", "evaluation", "memory_budget"])?;
+        let memory_budget=map.get("memory_budget").map(|v|require_bool(v,"memory_budget")).transpose()?.unwrap_or(false);
+        let case_limit=if memory_budget {2}else{3};
         let query = required_string(map, "query", 16 * 1024)?;
         let explicit_version = optional_string(map, "version", 128)?.map(str::to_string);
         let evaluation = map.get("evaluation").map(|v|require_bool(v,"evaluation")).transpose()?.unwrap_or(false);
@@ -614,7 +623,7 @@ impl Database {
             return Ok(json!({"version":version,"cases":[],"reason":"missing_task_family_or_language_filter"}));
         }
         let valid: Option<(bool, String, String, Option<String>)> = self.connection.query_row("SELECT invalidated,evaluation_status,status,evaluation_json FROM memory_versions WHERE id=?1", [&version], |row| Ok((row.get(0)?, row.get(1)?,row.get(2)?,row.get(3)?))).optional()?;
-        let compatible=valid.as_ref().and_then(|(_,_,_,report)|report.as_deref()).map(parse_json).transpose()?.as_ref().is_some_and(evaluation_report_compatible);
+        let compatible=valid.as_ref().and_then(|(_,_,_,report)|report.as_deref()).map(parse_json).transpose()?.as_ref().is_some_and(|report|evaluation_report_compatible(report)&&((report["evaluator_identity"]==BUDGET_EVALUATOR_IDENTITY)==memory_budget));
         if matches!(valid.as_ref(),Some((false,report,_,_)) if report=="passed") && !compatible {
             return Ok(json!({"version":version,"cases":[],"reason":"incompatible_evaluation_policy"}));
         }
@@ -656,12 +665,19 @@ impl Database {
         ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
         let mut bytes = 2usize;
         let mut cases = Vec::new();
-        for (score,id,content,labels,applicability,content_hash,applicability_reason,validation_assignment_event_id,validation_context,verification_status,last_validated_at) in ranked.into_iter().take(3) {
+        let mut selected_content = HashSet::new();
+        for (score,id,content,labels,applicability,content_hash,applicability_reason,validation_assignment_event_id,validation_context,verification_status,last_validated_at) in ranked.into_iter().take(if memory_budget {usize::MAX}else{case_limit}) {
+            if cases.len() >= case_limit {break;}
             let summary = parse_json(&content)?;
+            // Deduplicate identical teaching content, not IDs or differing judgments.
+            // Legacy evaluated retrieval retains its original selection semantics.
+            let selection_key=hash(&json!({"summary":summary,"labels":parse_json(&labels)?}));
+            if memory_budget && selected_content.contains(&selection_key) {continue;}
             let injected=json!({"id":id,"summary":summary,"labels":parse_json(&labels)?});
             let size=serde_json::to_vec(&injected)?.len()+usize::from(!cases.is_empty());
             if bytes + size > 4096 { continue; }
             bytes += size;
+            selected_content.insert(selection_key);
             cases.push(json!({"id":id,"summary":summary,"content":summary,"labels":parse_json(&labels)?,"applicability":applicability,"applicability_reason":applicability_reason,"validation_assignment_event_id":validation_assignment_event_id,"validation_context":validation_context,"verification_status":verification_status,"last_validated_at":last_validated_at,"content_hash":content_hash,"match_count":score}));
         }
         let reason=if !cases.is_empty(){"matched"}else if unknown_lineage{"unknown_lineage"}else if applicability_exclusions.iter().any(|item|item["status"]=="unknown"){"applicability_unknown"}else if !applicability_exclusions.is_empty(){"needs_revalidation"}else{"no_match"};
@@ -892,69 +908,9 @@ impl Database {
         let mut overflow=false;
         let mut exclusion_reasons:HashMap<&'static str,u64>=HashMap::new();
         for group in reports.values() {
-            let mut ordered_streams:HashMap<&str,Vec<&Value>>=HashMap::new();
-            let mut legacy=Vec::new();
-            for report in group {
-                if let Some(stream)=report.get("usage_stream_id").and_then(Value::as_str) {ordered_streams.entry(stream).or_default().push(report);}
-                else if report["scope"]=="attempt" {legacy.push(report);}
-                else if let Some(reason)=usage_exclusion_reason(report) {
-                    *exclusion_reasons.entry(reason).or_default()+=1;
-                    excluded+=1;
-                }
-            }
-            let selected=if ordered_streams.len()>1 {
-                let count=ordered_streams.values().map(Vec::len).sum::<usize>() as u64;
-                *exclusion_reasons.entry("multiple_ordered_streams").or_default()+=count;
-                excluded+=count;
-                None
-            } else if !ordered_streams.is_empty()&&!legacy.is_empty() {
-                let count=ordered_streams.values().map(Vec::len).sum::<usize>() as u64+legacy.len() as u64;
-                *exclusion_reasons.entry("mixed_ordered_and_legacy").or_default()+=count;
-                excluded+=count;
-                None
-            } else if let Some((stream_id,stream))=ordered_streams.into_iter().next() {
-                if reused_streams.contains(stream_id) {
-                    *exclusion_reasons.entry("usage_stream_reused").or_default()+=stream.len() as u64;
-                    excluded+=stream.len() as u64;
-                    None
-                } else {
-                    let mut sequences:HashMap<u64,&Value>=HashMap::new();
-                    let mut conflict=false;
-                    for report in &stream {
-                        let sequence=report["source_sequence"].as_u64().expect("validated usage source_sequence");
-                        if sequences.get(&sequence).is_some_and(|existing|*existing!=*report){conflict=true;}
-                        else {sequences.entry(sequence).or_insert(report);}
-                    }
-                    if conflict {
-                        *exclusion_reasons.entry("ordered_sequence_conflict").or_default()+=stream.len() as u64;
-                        excluded+=stream.len() as u64;
-                        None
-                    } else if let Some((_,report))=sequences.into_iter().max_by_key(|(sequence,_)|*sequence) {
-                        if let Some(reason)=usage_exclusion_reason(report) {
-                            *exclusion_reasons.entry(reason).or_default()+=1;
-                            excluded+=1;
-                            None
-                        } else {Some(report)}
-                    } else {None}
-                }
-            } else if legacy.is_empty() {
-                None
-            } else {
-                let signature=legacy_usage_signature(legacy[0]);
-                if legacy.iter().all(|report|legacy_usage_signature(report)==signature) {
-                    if let Some(reason)=usage_exclusion_reason(legacy[0]) {
-                        *exclusion_reasons.entry(reason).or_default()+=1;
-                        excluded+=1;
-                        None
-                    } else {Some(legacy[0])}
-                }
-                else {
-                    *exclusion_reasons.entry("legacy_reports_ambiguous").or_default()+=legacy.len() as u64;
-                    excluded+=legacy.len() as u64;
-                    None
-                }
-            };
-            if let Some(report)=selected {
+            let selection=crate::usage::select(&group.iter().collect::<Vec<_>>(),&reused_streams);
+            for (reason,count) in selection.exclusions {*exclusion_reasons.entry(reason).or_default()+=count;excluded+=count;}
+            if let Some(report)=selection.report {
                 included+=1;
                 let tokens=report["total_tokens"].as_u64().expect("eligible usage total_tokens");
                 if !overflow {
@@ -993,7 +949,8 @@ impl Database {
         let scenario=crate::scenario::summarize(manifests,scenario_usages);
         let estimated_saved=scenario["saved"]["central"].clone();
         let baseline_status=if scenario["status"]=="unavailable"{"collecting_inputs"}else{"scenario_estimate"};
-        Ok(json!({"tokens":{"recorded_total":if included>0&&!overflow {Some(total)} else {None},"included_attempts":included,"excluded_reports":excluded,"aggregation_status":aggregation_status,"exclusion_reasons":exclusion_reasons,"scope":"verified_non_overlapping_attempt_streams","estimated_saved":estimated_saved,"baseline_status":baseline_status,"scenario":scenario},"learning":{"uncertain_pending":uncertain,"problem_pending":problem,"uncertain_with_problem_pending":both,"reviewer_corrections_pending":corrections,"reviewed_cases":reviewed,"evaluated_versions":evaluated},"execution_models":distribution,"time_scope":{"default":"decision.created_at","evaluated_versions":"memory_versions.created_at","created_after":created_after,"created_before":created_before}}))
+        let efficiency=crate::efficiency::summary(&self.connection,&reused_streams,created_after,created_before)?;
+        Ok(json!({"tokens":{"recorded_total":if included>0&&!overflow {Some(total)} else {None},"included_attempts":included,"excluded_reports":excluded,"aggregation_status":aggregation_status,"exclusion_reasons":exclusion_reasons,"scope":"verified_non_overlapping_attempt_streams","estimated_saved":estimated_saved,"baseline_status":baseline_status,"scenario":scenario},"learning":{"uncertain_pending":uncertain,"problem_pending":problem,"uncertain_with_problem_pending":both,"reviewer_corrections_pending":corrections,"reviewed_cases":reviewed,"evaluated_versions":evaluated},"execution_models":distribution,"efficiency":efficiency,"time_scope":{"default":"decision.created_at","evaluated_versions":"memory_versions.created_at","created_after":created_after,"created_before":created_before}}))
     }
 
     fn overview(&self,value:Value)->Result<Value> {
@@ -1039,28 +996,6 @@ impl Database {
     }
 }
 
-fn legacy_usage_signature(report:&Value)->Value {
-    json!({
-        "total_tokens":report.get("total_tokens"),
-        "input_tokens":report.get("input_tokens"),
-        "output_tokens":report.get("output_tokens"),
-        "source":report.get("source"),
-        "source_verified":report.get("source_verified"),
-        "scope":report.get("scope"),
-        "checkpoint":report.get("checkpoint"),
-        "parent_scope":report.get("parent_scope"),
-        "overlap_status":report.get("overlap_status")
-    })
-}
-
-fn usage_exclusion_reason(report:&Value)->Option<&'static str> {
-    if report["source_verified"]!=true {Some("unverified_source")}
-    else if report["scope"]!="attempt" {Some("ineligible_scope")}
-    else if report["overlap_status"]!="non_overlapping" {Some("overlap_not_non_overlapping")}
-    else if report["total_tokens"].as_u64().is_none() {Some("unknown_total_tokens")}
-    else {None}
-}
-
 fn validate_feedback(value: &Value) -> Result<()> {
     if serde_json::to_vec(value)?.len() > MAX_FEEDBACK_BYTES { bail!("invalid: feedback payload exceeds 16 KiB"); }
     let map = object(value, "feedback event")?;
@@ -1079,10 +1014,10 @@ fn validate_feedback(value: &Value) -> Result<()> {
     let payload = object(map.get("payload").ok_or_else(|| anyhow!("invalid: payload is required"))?, "feedback payload")?;
     let common: &[&str] = if kind=="run_manifest" {&[]} else {&["scores","reason","evidence_refs"]};
     let specific: &[&str] = match kind {
-        "assignment" => &["recommended","selected","requested","effective","parent_attempt_ref","change_reason","mixed_configuration","environment"],
+        "assignment" => &["recommended","selected","requested","effective","parent_attempt_ref","change_reason","mixed_configuration","environment","execution"],
         "test" => &["result","status","scope","test_scope","code_revision","summary"],
         "review" => &["outcome","status","disposition","proposed_labels","summary"],
-        "outcome" => &["outcome","status","summary","failure_reason"],
+        "outcome" => &["outcome","status","summary","failure_reason","execution"],
         "user_choice" => &["choice","accepted","selected","summary"],
         "usage" => &["total_tokens","input_tokens","output_tokens","source","source_verified","scope","checkpoint","parent_scope","overlap_status","aggregation","usage_stream_id","source_sequence"],
         "run_manifest" => &["manifest_version","run_id","host_root_ref","mode","observed_at","terminal_checkpoint","context","meter","segments","outcome_event_ids","coverage","scenario"],
@@ -1090,6 +1025,7 @@ fn validate_feedback(value: &Value) -> Result<()> {
     };
     let mut accepted = common.to_vec(); accepted.extend_from_slice(specific);
     allowed(payload,&accepted)?;
+    crate::execution::validate(kind,&map["payload"])?;
     if kind!="run_manifest" {validate_optional_common(payload)?;}
     if let Some(scores) = payload.get("scores") {
         let scores = scores.as_array().ok_or_else(|| anyhow!("invalid: payload.scores must be an array"))?;
@@ -1385,6 +1321,10 @@ fn insert_assignment(transaction: &Transaction<'_>, event_id: &str, decision_id:
 }
 
 fn migrate(connection:&Connection)->Result<()> {
+    migrate_with_backup(connection,None)
+}
+
+fn migrate_with_backup(connection:&Connection,backup:Option<&(String,String)>)->Result<()> {
     let version:i64=connection.query_row("PRAGMA user_version",[],|row|row.get(0))?;
     if version>SCHEMA_VERSION {bail!("invalid: database schema is newer than supported");}
     let transaction=connection.unchecked_transaction()?;
@@ -1392,6 +1332,11 @@ fn migrate(connection:&Connection)->Result<()> {
     if version<2 {transaction.execute_batch(MIGRATION_2)?;}
     if version<3 {transaction.execute_batch(MIGRATION_3)?;}
     if version<4 {transaction.execute_batch(MIGRATION_4)?;}
+    if version<5 {transaction.execute_batch(MIGRATION_5)?;}
+    if let Some((id,digest))=backup {
+        transaction.execute("INSERT INTO backups(id,relative_path,sha256,schema_version,created_at) VALUES(?1,?2,?3,?4,?5)",params![id,format!("backups/{id}.sqlite3"),digest,version,now()])?;
+        emit_tx(&transaction,"backup.created",&json!({"id":id,"reason":"pre_migration"}))?;
+    }
     transaction.pragma_update(None,"user_version",SCHEMA_VERSION)?;
     transaction.commit()?;
     Ok(())
@@ -1583,28 +1528,48 @@ fn scrub_case_references(root:&Path,transaction:&Transaction<'_>,case_ids:&[Stri
     if case_ids.is_empty(){return Ok(());}
     let withdrawn=case_ids.iter().cloned().collect::<HashSet<_>>();
     let contexts={
-        let mut statement=transaction.prepare("SELECT id,context_json FROM decisions WHERE context_json IS NOT NULL AND deleted_at IS NULL")?;
-        let values=statement.query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut statement=transaction.prepare("SELECT id,context_json,result_json FROM decisions WHERE deleted_at IS NULL AND (context_json IS NOT NULL OR result_json IS NOT NULL)")?;
+        let values=statement.query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,Option<String>>(1)?,row.get::<_,Option<String>>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
         values
     };
-    for (decision_id,text) in contexts {
-        let mut context=parse_json(&text)?;
-        if scrub_value(&mut context,&withdrawn) {
-            if let Some(map)=context.as_object_mut(){map.insert("evidence_withdrawn".into(),json!(case_ids));}
-            transaction.execute("UPDATE decisions SET context_json=?2 WHERE id=?1",params![decision_id,context.to_string()])?;
+    for (decision_id,context,result) in contexts {
+        for (column,text) in [("context_json",context),("result_json",result)] {
+            let Some(text)=text else{continue;};
+            let mut value=parse_json(&text)?;
+            if scrub_value(&mut value,&withdrawn) {
+                if let Some(map)=value.as_object_mut(){map.insert("evidence_withdrawn".into(),json!(true));}
+                transaction.execute(&format!("UPDATE decisions SET {column}=?2 WHERE id=?1"),params![decision_id,value.to_string()])?;
+            }
         }
     }
     let snapshots={
-        let mut statement=transaction.prepare("SELECT id,payload_json,artifact_id,decision_id FROM decision_snapshots WHERE kind='context'")?;
+        let mut statement=transaction.prepare("SELECT id,payload_json,artifact_id,decision_id FROM decision_snapshots WHERE kind IN('context','output')")?;
         let values=statement.query_map([],|row|Ok((row.get::<_,i64>(0)?,row.get::<_,String>(1)?,row.get::<_,Option<String>>(2)?,row.get::<_,String>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
         values
     };
     for (snapshot_id,text,artifact_id,decision_id) in snapshots {
         let mut payload=match artifact_id {Some(id)=>evidence::read(root,&artifact_get(transaction,&id)?)?,None=>parse_json(&text)?};
         if scrub_value(&mut payload,&withdrawn) {
-            if let Some(map)=payload.as_object_mut(){map.insert("evidence_withdrawn".into(),json!(case_ids));}
+            if let Some(map)=payload.as_object_mut(){map.insert("evidence_withdrawn".into(),json!(true));}
             let (inline,artifact_id)=snapshot_storage(root,transaction,&decision_id,&payload)?;
             transaction.execute("UPDATE decision_snapshots SET payload_json=?2,payload_hash=?3,capture_status='redacted',artifact_id=?4 WHERE id=?1",params![snapshot_id,inline,hash(&payload),artifact_id])?;
+        }
+    }
+    for (table,column) in [("memory_versions","evaluation_json"),("jobs","result_json")] {
+        let reports={
+            let mut statement=transaction.prepare(&format!("SELECT id,{column} FROM {table} WHERE {column} IS NOT NULL"))?;
+            let values=statement.query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            values
+        };
+        for (id,text) in reports {
+            let mut report=parse_json(&text)?;
+            if scrub_value(&mut report,&withdrawn) {
+                if let Some(map)=report.as_object_mut(){map.insert("evidence_withdrawn".into(),json!(true));}
+                transaction.execute(&format!("UPDATE {table} SET {column}=?2 WHERE id=?1"),params![id,report.to_string()])?;
+                if table=="memory_versions" {
+                    transaction.execute("UPDATE memory_versions SET invalidated=1,status=CASE WHEN status='active' THEN 'invalidated' ELSE status END,invalidation_reason='evaluation evidence withdrawn' WHERE id=?1",[id])?;
+                }
+            }
         }
     }
     Ok(())
@@ -1615,11 +1580,17 @@ pub(crate) fn scrub_value(value:&mut Value,withdrawn:&HashSet<String>)->bool {
     match value {
         Value::Object(map)=>{
             for (key,child) in map.iter_mut(){
-                if key=="case_ids" {
+                if ["case_ids","worker_case_ids","selected_case_ids","received_case_ids"].contains(&key.as_str()) {
                     if let Some(items)=child.as_array_mut(){let before=items.len();items.retain(|item|item.as_str().is_none_or(|id|!withdrawn.contains(id)));changed|=items.len()!=before;}
-                } else if key=="cases" {
+                } else if key=="cases"||key=="excluded" {
                     if let Some(items)=child.as_array_mut(){let before=items.len();items.retain(|item|item.get("id").or_else(||item.get("case_id")).and_then(Value::as_str).is_none_or(|id|!withdrawn.contains(id)));changed|=items.len()!=before;for item in items{changed|=scrub_value(item,withdrawn);}}
                 } else {changed|=scrub_value(child,withdrawn);}
+            }
+            if changed&&map.get("contract").is_some_and(|v|v=="memory_receipt_v1") {
+                map.insert("receipt_status".into(),json!("withdrawn"));
+                map.insert("complete_base_state".into(),Value::Null);
+                map.insert("input_fingerprint".into(),Value::Null);
+                map.insert("usage_scope".into(),json!("withdrawn"));
             }
         }
         Value::Array(items)=>for item in items{changed|=scrub_value(item,withdrawn);},
@@ -1655,7 +1626,7 @@ fn decision_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     Ok(json!({"id":row.get::<_,String>(0)?,"request_id":row.get::<_,String>(1)?,"request":parse_sql_json(row.get::<_,String>(2)?)?,"result":optional_sql_json(row.get::<_,Option<String>>(3)?)?,"error":optional_sql_json(row.get::<_,Option<String>>(4)?)?,"context":optional_sql_json(row.get::<_,Option<String>>(5)?)?,"recording_status":row.get::<_,String>(6)?,"protected":row.get::<_,bool>(7)?,"created_at":row.get::<_,i64>(8)?,"finished_at":row.get::<_,Option<i64>>(9)?}))
 }
 
-fn review_queue_cte()->&'static str {r#"WITH decision_signals AS (
+pub(crate) fn review_queue_cte()->&'static str {r#"WITH decision_signals AS (
 SELECT d.*,
 COALESCE(json_extract(d.result_json,'$.laya_result.risk.label'),json_extract(d.result_json,'$.advice.assessment.risk.choice'),json_extract(d.result_json,'$.answers.risk.choice'),CASE WHEN json_type(d.result_json,'$.risk')='text' THEN json_extract(d.result_json,'$.risk') END) AS risk,
 COALESCE((COALESCE(json_extract(d.result_json,'$.uncertain'),0)=1 OR json_extract(d.result_json,'$.certainty')='uncertain' OR COALESCE(json_extract(d.result_json,'$.advice.uncertain'),0)=1 OR json_extract(d.result_json,'$.advice.certainty')='uncertain'),0) AS uncertain,
@@ -1754,7 +1725,7 @@ fn required_string_value<'a>(value:&'a Value,key:&str,max:usize)->Result<&'a str
 fn optional_string<'a>(map: &'a Map<String,Value>, key: &str, max: usize) -> Result<Option<&'a str>> { match map.get(key) { None|Some(Value::Null)=>Ok(None), Some(Value::String(v)) if !v.is_empty()&&v.len()<=max=>Ok(Some(v)), _=>bail!("invalid: {key} must be a non-empty string or null") } }
 pub fn canonical_task_family(value:&str)->Result<String>{let value=value.trim().to_ascii_lowercase();if value.is_empty()||value.len()>64||!value.bytes().all(|byte|byte.is_ascii_lowercase()||byte.is_ascii_digit()||byte==b'-')||value.starts_with('-')||value.ends_with('-')||value.contains("--"){bail!("invalid: task_family must be a canonical slug");}Ok(if value=="docs"{"documentation".into()}else{value})}
 pub fn validate_task_lineage(value:&str)->Result<String>{let value=value.trim();if value.is_empty()||value.len()>128||!value.bytes().all(|byte|byte.is_ascii_alphanumeric()||matches!(byte,b'-'|b'_'|b'.'|b':'|b'/')){bail!("invalid: task_lineage must be a bounded provenance identifier");}Ok(value.to_string())}
-fn evaluation_report_compatible(report:&Value)->bool{report["evaluator_identity"]==EVALUATOR_IDENTITY&&report["retrieval_policy_version"]==RETRIEVAL_POLICY_VERSION&&report["candidate_memory_exposure"].as_u64().unwrap_or(0)>0}
+fn evaluation_report_compatible(report:&Value)->bool{(report["evaluator_identity"]==EVALUATOR_IDENTITY&&report["input_policy"].is_null()||report["evaluator_identity"]==BUDGET_EVALUATOR_IDENTITY&&report["input_policy"]==MEMORY_INPUT_POLICY)&&report["retrieval_policy_version"]==RETRIEVAL_POLICY_VERSION&&report["candidate_memory_exposure"].as_u64().unwrap_or(0)>0}
 fn require_bool(value: &Value,key:&str)->Result<bool>{value.as_bool().ok_or_else(||anyhow!("invalid: {key} must be boolean"))}
 fn require_i64(value: &Value,key:&str)->Result<i64>{value.as_i64().ok_or_else(||anyhow!("invalid: {key} must be an integer"))}
 fn id_param(value:&Value)->Result<&str>{required_string(object(value,"id parameter")?,"id",128)}
@@ -2180,6 +2151,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn budgeted_retrieval_deduplicates_teaching_content_in_both_languages() {
+        for (language,query,duplicate,distinct) in [("en","rollback","rollback transaction safety guidance","rollback requires separate archive verification"),("zh","迁移","迁移事务安全检查","迁移前需要独立验证备份")] {
+            let (_root,store)=recorded_store().await;
+            let mut ids=Vec::new();
+            for (index,content) in [duplicate,duplicate,distinct].iter().enumerate() {
+                let id=format!("case-{index}");
+                store.call("decisions/begin",json!({"request_id":id,"id":id,"request":{"state":content}})).await.unwrap();
+                let review=store.call("reviews/create",json!({"id":id,"expected_revision":0,"status":"confirmed","labels":{"complexity":"high","risk":"high","certainty":"clear"},"task_family":"migration","task_lineage":format!("source-{index}"),"language":language,"reason":"confirmed"})).await.unwrap();
+                ids.push(review["case_id"].clone());
+            }
+            store.call("versions/create",json!({"id":"duplicates","case_ids":ids,"configuration":{}})).await.unwrap();
+            let mut request=json!({"query":query,"version":"duplicates","evaluation":true,"configuration":{"task_family":"migration","task_lineage":"holdout","language":language}});
+            let legacy=store.call("memory/retrieve",request.clone()).await.unwrap();
+            assert_eq!(legacy["cases"].as_array().unwrap().len(),3);
+            request["memory_budget"]=json!(true);
+            let budgeted=store.call("memory/retrieve",request).await.unwrap();
+            let cases=budgeted["cases"].as_array().unwrap();
+            assert_eq!(cases.len(),2);
+            assert_eq!(cases.iter().filter(|item|item["summary"]==duplicate).count(),1);
+            assert_eq!(cases.iter().filter(|item|item["summary"]==distinct).count(),1);
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_v3_active_report_keeps_online_retrieval_but_rejects_budgeted_injection() {
+        let (_root,store)=recorded_store().await;
+        store.call("settings/update",json!({"memory_enabled":true})).await.unwrap();
+        store.call("decisions/begin",json!({"request_id":"legacy","id":"legacy","request":{"state":"rollback migration safety guidance"}})).await.unwrap();
+        let review=store.call("reviews/create",json!({"id":"legacy","expected_revision":0,"status":"confirmed","labels":{"complexity":"high","risk":"high","certainty":"clear"},"task_family":"migration","task_lineage":"legacy-reviewed","language":"en","reason":"confirmed"})).await.unwrap();
+        store.call("versions/create",json!({"id":"legacy-v3","case_ids":[review["case_id"].clone()],"configuration":{}})).await.unwrap();
+        store.call("versions/report",json!({"id":"legacy-v3","report":{"passed":true,"candidate_memory_exposure":1,"evaluator_identity":EVALUATOR_IDENTITY,"retrieval_policy_version":RETRIEVAL_POLICY_VERSION}})).await.unwrap();
+        store.call("versions/activate",json!({"id":"legacy-v3"})).await.unwrap();
+
+        let configuration=json!({"task_family":"migration","language":"en"});
+        let legacy=store.call("memory/retrieve",json!({"query":"rollback migration safety","configuration":configuration.clone()})).await.unwrap();
+        assert_eq!(legacy["reason"],"matched");
+        assert_eq!(legacy["cases"][0]["id"],review["case_id"]);
+        let budgeted=store.call("memory/retrieve",json!({"query":"rollback migration safety","memory_budget":true,"configuration":configuration})).await.unwrap();
+        assert_eq!(budgeted["reason"],"incompatible_evaluation_policy");
+        assert!(budgeted["cases"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn budget_v4_report_requires_input_policy_and_only_budgeted_retrieval_gets_two_cases() {
+        let (_root,store)=recorded_store().await;
+        store.call("settings/update",json!({"memory_enabled":true})).await.unwrap();
+        let mut case_ids=Vec::new();
+        for index in 0..3 {
+            let id=format!("budget-{index}");
+            store.call("decisions/begin",json!({"request_id":id,"id":id,"request":{"state":format!("shared rollback migration safety case {index}")}})).await.unwrap();
+            let review=store.call("reviews/create",json!({"id":id,"expected_revision":0,"status":"confirmed","labels":{"complexity":"high","risk":"high","certainty":"clear"},"task_family":"migration","task_lineage":format!("budget-reviewed-{index}"),"language":"en","reason":"confirmed"})).await.unwrap();
+            case_ids.push(review["case_id"].clone());
+        }
+        store.call("versions/create",json!({"id":"missing-policy","case_ids":case_ids.clone(),"configuration":{}})).await.unwrap();
+        store.call("versions/report",json!({"id":"missing-policy","report":{"passed":true,"candidate_memory_exposure":1,"evaluator_identity":BUDGET_EVALUATOR_IDENTITY,"retrieval_policy_version":RETRIEVAL_POLICY_VERSION}})).await.unwrap();
+        assert!(store.call("versions/activate",json!({"id":"missing-policy"})).await.unwrap_err().to_string().contains("incompatible with the current retrieval policy"));
+
+        store.call("versions/create",json!({"id":"budget-v4","case_ids":case_ids.clone(),"configuration":{}})).await.unwrap();
+        store.call("versions/report",json!({"id":"budget-v4","report":{"passed":true,"candidate_memory_exposure":1,"evaluator_identity":BUDGET_EVALUATOR_IDENTITY,"input_policy":MEMORY_INPUT_POLICY,"retrieval_policy_version":RETRIEVAL_POLICY_VERSION}})).await.unwrap();
+        store.call("versions/activate",json!({"id":"budget-v4"})).await.unwrap();
+
+        let configuration=json!({"task_family":"migration","language":"en"});
+        let ordinary=store.call("memory/retrieve",json!({"query":"shared rollback migration safety","configuration":configuration.clone()})).await.unwrap();
+        assert_eq!(ordinary["reason"],"incompatible_evaluation_policy");
+        assert!(ordinary["cases"].as_array().unwrap().is_empty());
+        let budgeted=store.call("memory/retrieve",json!({"query":"shared rollback migration safety","memory_budget":true,"configuration":configuration.clone()})).await.unwrap();
+        assert_eq!(budgeted["reason"],"matched");
+        assert_eq!(budgeted["cases"].as_array().unwrap().len(),2);
+        assert!(budgeted["cases"].as_array().unwrap().iter().all(|case|case_ids.contains(&case["id"])));
+        let invalid=store.call("memory/retrieve",json!({"query":"shared rollback migration safety","memory_budget":"true","configuration":configuration})).await.unwrap_err();
+        assert!(invalid.to_string().starts_with("invalid: memory_budget"));
+    }
+
+    #[tokio::test]
     async fn superseding_reviews_withdraw_old_cases_and_invalidate_versions() {
         let (_root,store)=recorded_store().await;
         store.call("decisions/begin",json!({"request_id":"r","id":"d","request":{"state":"migration"}})).await.unwrap();
@@ -2340,7 +2385,7 @@ mod tests {
             connection.execute("UPDATE settings SET active_memory_version='legacy-active' WHERE singleton=1",[]).unwrap();
         }
         let store=Store::open(root.path()).unwrap();
-        assert_eq!(store.call("status",json!({})).await.unwrap()["schema_version"],4);
+        assert_eq!(store.call("status",json!({})).await.unwrap()["schema_version"],5);
         let cases=store.call("cases/list",json!({})).await.unwrap();
         let task=cases["items"].as_array().unwrap().iter().find(|case|case["id"]=="task:1").unwrap();
         let config=cases["items"].as_array().unwrap().iter().find(|case|case["id"]=="config:1").unwrap();
@@ -2408,7 +2453,7 @@ mod tests {
         let detail=store.call("decisions/get",json!({"id":"consumer"})).await.unwrap();
         assert!(detail["context"]["memory"]["case_ids"].as_array().unwrap().is_empty());
         assert!(detail["context"]["memory"]["cases"].as_array().unwrap().is_empty());
-        assert_eq!(detail["context"]["evidence_withdrawn"][0],case_id);
+        assert_eq!(detail["context"]["evidence_withdrawn"],true);
         let snapshot=detail["snapshots"].as_array().unwrap().iter().find(|snapshot|snapshot["kind"]=="context").unwrap();
         assert_eq!(snapshot["capture_status"],"redacted");
         assert!(snapshot["payload"]["memory"]["cases"].as_array().unwrap().is_empty());

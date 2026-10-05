@@ -8,6 +8,7 @@ import sys
 
 from . import server
 from .advisor import ADVISOR_QUESTIONS
+from .assessment_cache import AssessmentCache, assessment_key
 
 
 PROTOCOL_VERSION = 1
@@ -23,6 +24,7 @@ _CHECKPOINT_FILES = (
 _checkpoint_identity_cache = {}
 _loaded_agent_id = None
 _loaded_model = None
+_assessment_cache = AssessmentCache()
 
 
 class WorkerError(Exception):
@@ -136,34 +138,80 @@ def _model_info():
         "model": model,
         "advisor_questions": ADVISOR_QUESTIONS,
         "rules_version": RULES_VERSION,
+        "supported_contracts": ["orchestration_plan_v1", "assessment_reuse_v1", "memory_budget_v1"],
     }
 
 
 def _predict(params):
-    allowed = {"state", "questions", "advisor", "memory_cases", "model_tiers"}
+    allowed = {"state", "questions", "advisor", "memory_cases", "model_tiers", "orchestration", "_cache_context", "memory_budget"}
     unknown = set(params) - allowed
     if unknown:
         raise ValueError("predict contains unknown parameters")
     if "state" not in params:
         raise ValueError("predict requires state")
+    if type(params.get("memory_budget", False)) is not bool:
+        raise ValueError("memory_budget must be a boolean")
     if "memory_cases" in params and params["memory_cases"] is None:
         raise ValueError("memory_cases must be a list of at most 3 cases")
+    context = params.get("_cache_context")
+    if context is not None:
+        if (not isinstance(context, dict) or set(context) != {"decision_id", "service_instance", "epoch", "memory_version", "settings"}
+                or not isinstance(context["decision_id"], str) or not context["decision_id"]
+                or not isinstance(context["service_instance"], str) or not context["service_instance"]
+                or type(context["epoch"]) is not int or context["epoch"] < 0
+                or not isinstance(params.get("advisor"), dict)):
+            raise ValueError("invalid private assessment cache context")
+    settings = server.preferences() if context is not None else None
+    key = assessment_key(params, _model_info(), settings) if context is not None else None
+    cached = _assessment_cache.get(key) if key is not None else None
     loading = server._agent is None
     before = _configured_model_info() if loading else None
+    arguments = {
+        "memory_cases": params.get("memory_cases", [] if params.get("advisor") is not None else None),
+        "model_tiers": params.get("model_tiers"), "orchestration": params.get("orchestration"),
+        "memory_budget": params.get("memory_budget", False),
+    }
     try:
-        return server.run_prediction(
+        result = server.run_prediction(
             params["state"],
             params.get("questions"),
             params.get("advisor"),
-            memory_cases=params.get(
-                "memory_cases", [] if params.get("advisor") is not None else None
-            ),
-            model_tiers=params.get("model_tiers"),
+            **arguments,
+            _cached_result=cached["raw"] if cached else server._NO_CACHED_RESULT,
         )
+        fingerprint = result.get("meta", {}).get("memory_receipt", {}).get("input_fingerprint")
+        if cached is not None and fingerprint != cached.get("input_fingerprint"):
+            cached = None
+            result = server.run_prediction(params["state"], params.get("questions"),
+                                           params.get("advisor"), **arguments)
     finally:
         if loading and server._agent is not None:
             after = _configured_model_info()
             _bind_loaded_model(server._agent, before, after)
+    receipt = result.get("meta", {}).get("memory_receipt")
+    if receipt is not None:
+        receipt["checkpoint_identity"] = _model_info()["model"]
+    if context is not None:
+        meta = result.setdefault("meta", {})
+        if cached is not None:
+            if receipt is not None:
+                receipt["usage_scope"] = "source_evaluation"
+                receipt["reused_from_decision_id"] = cached["decision_id"]
+            meta["reused_from_decision_id"] = cached["decision_id"]
+            meta["assessment_cache"] = {"status": "hit", "inference_input_tokens": 0,
+                                        "inference_output_tokens": 0, "raw_usage_scope": "source_evaluation"}
+            if "orchestration_plan" in result:
+                result["orchestration_plan"]["reused_from_decision_id"] = cached["decision_id"]
+        else:
+            key = assessment_key(params, _model_info(), settings)
+            raw = result.get("laya_result")
+            if (key is not None and isinstance(raw, dict) and isinstance(raw.get("answers"), dict)
+                    and settings == server.preferences()):
+                _assessment_cache.put(key, {"raw": raw, "decision_id": context["decision_id"],
+                                            "input_fingerprint": receipt.get("input_fingerprint") if receipt else None})
+            meta["assessment_cache"] = {"status": "miss" if key is not None else "unavailable",
+                                        "raw_usage_scope": "current_evaluation"}
+    return result
 
 
 def _preferences(params):
@@ -171,13 +219,21 @@ def _preferences(params):
     unknown = set(params) - allowed
     if unknown:
         raise ValueError("preferences contains unknown parameters")
-    return server.laya_advisor_preferences(
+    result = server.laya_advisor_preferences(
         params.get("policy"), params.get("ceiling"), params.get("models"),
         params.get("squad"),
     )
+    if any(params.get(key) is not None for key in ("policy", "ceiling", "squad")):
+        _assessment_cache.clear()
+    return result
 
 
 def _dispatch(method, params):
+    if method == "clear_assessment_cache":
+        if params:
+            raise ValueError("clear_assessment_cache does not accept parameters")
+        _assessment_cache.clear()
+        return {"cleared": True}, False
     if method == "predict":
         return _predict(params), False
     if method == "preferences":

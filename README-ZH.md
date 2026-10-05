@@ -7,7 +7,7 @@ Laya Model Advisor 与 Alpha Squad 仍作为独立 Skill 安装，Alpha Squad �
 
 [English](README.md) | [简体中文](README-ZH.md)
 
-工作台 V1 已提供[预编译预览版](https://github.com/leo1394/oh-my-laya/releases/tag/v0.2.0-rc.3)，安装器自动校验并安装，无需 Rust 或 Node.js。尚未完成的验收项目见[使用与验证状态](docs/workbench-implementation-status.md)。
+工作台 V1 已提供[预编译预览版](https://github.com/leo1394/oh-my-laya/releases/tag/v0.2.0-rc.3)，安装器自动校验并安装，无需 Rust 或 Node.js。下述 V1.5 源码功能仍为实验性功能，不包含在该发布版中。
 
 > Oh My Laya — Reflect. Route. Refine.
 
@@ -150,6 +150,7 @@ Oh My Laya 提供以下工具：
 | --- | --- |
 | `laya_tell_me` | `choice` 分类、`score` 评分、`noul` 是非概率 |
 | `laya_advisor_preferences` | 查看或修改模型建议偏好 |
+| `laya_feedback` | 保存已授权采集的执行反馈与原始首次评分 |
 
 Laya 不生成代码，也不应被用于授权删除、发布等高风险操作。多语言模型总上下文为 1,024 tokens，长内容请先让 Agent 摘要。
 
@@ -195,6 +196,21 @@ Alpha Squad 通过宿主设置子代理模型，不会切换主会话模型。
 ```
 
 默认安装到 `~/.local/share/oh-my-laya/`。每个 Agent 会启动独立的惰性 MCP 进程；同时调用时，每个进程都会占用一份统一内存。
+
+## V1.5 预览：试用、关闭与恢复
+
+试用前需要配套的源码构建 bridge/service/worker 和 Squad Skill；已发布的 rc.3 安装器不会启用这些功能。可对 Agent 说：
+
+```text
+本任务使用 Alpha Squad 配合 Laya 的显式结构化编排试用。
+先检查兼容性，保持我的主模型、授权上限和采集设置不变。
+```
+
+Agent 自动填写版本化 `orchestration` 上下文并设置 `enabled: true`，无需用户输入运行 ID。不支持的新旧组件会报告降级。关闭时，让 Agent 后续调用不传 `orchestration`（或将其 `enabled` 设为 `false`），即可回到 V1 路由，不删除反馈。带预算的案例注入需独立兼容评测和明确启用，不会静默升级原有案例授权。
+
+升级会创建私有 `pre-migration-*` 快照。新建快照可在**设置 → 备份与导出**中找到。**恢复**会将该数据快照恢复到当前 schema，保留隐私删除，并为被替换状态创建安全备份；不会合并后续记录，也不是二进制降级。不要让旧程序直接打开新数据库；旧版回退需先停服并使用经核实、包含外部证据的兼容备份。历史未登记的迁移档案不会自动导入。
+
+Token 数字仍区分预估与明确范围内的实际消耗。对照效果评测待单独授权，尚未证明任何节省比例。试用本身不授予模型调用、采集、本机安装变更或发布权限。
 
 ## 开发验证
 

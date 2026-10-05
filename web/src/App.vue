@@ -7,6 +7,7 @@ import { originalLabels, reviewLabels, reviewPayloadLabels } from './review.js'
 import ReviewSignals from './ReviewSignals.vue'
 import MemoryVersion from './MemoryVersion.vue'
 import ImpactOverview from './ImpactOverview.vue'
+import ExecutionEvidence from './ExecutionEvidence.vue'
 import DateRangePicker from './DateRangePicker.vue'
 import {
   dateRangeBounds,
@@ -28,7 +29,7 @@ import {
 
 const tabs = computed(() => [
   { id: 'queue', number: '01', label: t('Overview', '概览') },
-  { id: 'cases', number: '02', label: t('Case study', '案例库') },
+  { id: 'cases', number: '02', label: t('Case study', '案例学习') },
   { id: 'settings', number: '03', label: t('Settings', '设置') }
 ])
 const tiers = ['low', 'medium', 'high']
@@ -124,6 +125,7 @@ const evidenceGroups = computed(() => {
   return [
     { label: t('Snapshots', '快照'), items: decision.snapshots },
     { label: t('Execution attempts', '执行记录'), items: decision.execution_attempts },
+    { label: t('Efficiency observations', '效率观察'), items: decision.efficiency_observations },
     { label: t('Model observations', '模型观测'), items: decision.model_observations },
     { label: t('Feedback', '反馈'), items: decision.feedback },
     { label: t('Review revisions', '复核历史'), items: decision.reviews }
@@ -575,6 +577,7 @@ onBeforeUnmount(() => {
             <div class="detail-columns">
               <div class="evidence-column">
                 <article class="panel evidence-card"><h3>{{ t('Laya’s original assessment', 'Laya 原始判断') }}</h3><div class="label-grid"><div v-for="key in ['complexity', 'risk', 'certainty']" :key="key"><span>{{ label(key) }}</span><strong>{{ label(originalLabels(selectedDecision)[key]) }}</strong></div></div><dl class="facts"><div><dt>{{ t('Recommended pair', '建议搭配') }}</dt><dd>{{ observedPair(selectedDecision.result?.advice?.recommendation) }}</dd></div><div><dt>{{ t('Latest execution', '最近实际执行') }}</dt><dd>{{ observedPair(selectedDecision.execution_attempts?.at(-1)?.effective) }}</dd></div></dl><p>{{ t('First feedback is retained alongside later corrections.', '首次反馈与后续修正独立保留，不覆盖。') }}</p><div v-for="feedback in (selectedDecision.feedback || []).slice(0, 3)" :key="feedback.event_id" class="feedback-summary"><strong>{{ feedback.source?.role || feedback.kind }}</strong><p>{{ feedback.payload?.summary || feedback.payload?.reason || feedback.payload?.outcome || feedback.payload?.result || t('Feedback recorded', '已记录反馈') }}</p><span v-for="(score, index) in feedback.payload?.scores || []" :key="index">{{ label(score.dimension) }}: {{ score.value ?? '—' }} · </span></div></article>
+                <ExecutionEvidence :observations="selectedDecision.efficiency_observations"/>
                 <details class="panel evidence-card" @toggle="rawEvidenceOpen = $event.target.open"><summary>{{ t('Original evidence & history', '原始证据与历史') }}</summary><p>{{ t('Original records are not translated or overwritten.', '原始记录不翻译、不覆盖。') }}</p><template v-if="rawEvidenceOpen"><details v-for="group in evidenceGroups" :key="group.label"><summary>{{ group.label }} · {{ group.items.length }}</summary><pre>{{ JSON.stringify(group.items, null, 2) }}</pre></details><details><summary>{{ t('Complete record', '完整记录') }}</summary><pre>{{ JSON.stringify(selectedDecision, null, 2) }}</pre></details></template></details>
               </div>
               <form class="panel review-form" @submit.prevent="saveReview">

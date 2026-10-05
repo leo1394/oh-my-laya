@@ -128,7 +128,7 @@ impl Outbox {
             let mut payload:Value=serde_json::from_str(&text)?;
             if crate::store::scrub_value(&mut payload,&withdrawn) {
                 payload["capture_redacted"]=json!(true);
-                if payload["context"].is_object() {payload["context"]["evidence_withdrawn"]=json!(ids);}
+                if payload["context"].is_object() {payload["context"]["evidence_withdrawn"]=json!(true);}
                 tx.execute("UPDATE snapshots SET payload=?,hash=? WHERE event_id=?",params![payload.to_string(),hash(&payload),id])?;
             }
         }

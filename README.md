@@ -2,7 +2,7 @@
 
 [English](README.md) | [中文](README-ZH.md)
 
-Workbench V1 is available as a [prebuilt preview](https://github.com/leo1394/oh-my-laya/releases/tag/v0.2.0-rc.3). The installer verifies and installs it without Rust or Node.js. See [usage and verification status](docs/workbench-implementation-status.md) for remaining acceptance limits.
+Workbench V1 is available as a [prebuilt preview](https://github.com/leo1394/oh-my-laya/releases/tag/v0.2.0-rc.3). The installer verifies and installs it without Rust or Node.js. V1.5 source features below are experimental and are not included in that release.
 
 > Oh My Laya — Reflect. Route. Refine.
 
@@ -155,6 +155,7 @@ Oh My Laya provides these tools:
 | --- | --- |
 | `laya_tell_me` | `choice` classification, `score` ranking, and `noul` yes/no probability |
 | `laya_advisor_preferences` | Read or change model recommendation preferences |
+| `laya_feedback` | Save authorized execution feedback and its original first score |
 
 Laya does not generate code and must not authorize destructive, publishing, or other consequential actions. The multilingual model has a total context budget of 1,024 tokens, so ask the agent to summarize long inputs first.
 
@@ -204,6 +205,21 @@ silently overwritten. A network failure is reported, not treated as an update.
 ```
 
 The default installation directory is `~/.local/share/oh-my-laya/`. Each agent starts its own lazy MCP process; concurrent callers each consume a separate unified-memory allocation.
+
+## V1.5 preview: try it, turn it off, recover
+
+Use a matching source-built bridge/service/worker and companion Skill before trying V1.5. The released rc.3 installer does not enable it. Ask your agent:
+
+```text
+For this task, use Alpha Squad with Laya's opt-in structured orchestration.
+Check compatibility first; keep my model, authorization ceilings and recording settings unchanged.
+```
+
+The agent supplies the versioned `orchestration` context with `enabled: true`; you do not enter run IDs. Unsupported peers report a fallback. To stop the trial, ask the agent to omit `orchestration` on later calls (or set its `enabled` field to `false`). This returns to V1 routing without deleting feedback. Budgeted case injection needs its own compatible evaluation and explicit activation; existing case approvals are not silently upgraded.
+
+An upgrade creates a private `pre-migration-*` snapshot. Find newly created snapshots in **Settings → Backup & export**. **Restore** recovers that data snapshot into the current schema, preserves privacy deletions, and creates a safety backup of the state being replaced. It does not merge later records or downgrade the binary. Do not point an older binary at a newer database; binary rollback requires a stopped service and a compatible verified backup, including external evidence. Older, unlisted migration archives are not automatically imported.
+
+Token figures remain estimates or explicitly scoped actual usage. Comparative efficiency evaluation is pending separate approval; no token-saving percentage is proven. The preview does not authorize model calls, collection, installation changes or publishing.
 
 ## Development
 

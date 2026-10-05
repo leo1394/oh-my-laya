@@ -34,14 +34,35 @@ pub fn tools() -> Value {
         "task_lineage":{"type":"string","maxLength":128,"pattern":"^[A-Za-z0-9][A-Za-z0-9_.:/-]*$","description":"Optional independent task/holdout provenance. Same-lineage memory is excluded. Omit when unknown; it is never inferred."}
     });
     tools["tools"][0]["inputSchema"]["properties"]["advisor"]["description"]=json!("Advisor catalog and optional memory routing metadata. Retrieval language is derived from state; no advisor.language field is accepted for routing.");
+    tools["tools"][0]["inputSchema"]["properties"]["orchestration"]=json!({
+        "type":["object","null"],"additionalProperties":false,
+        "description":"Opt-in minimal orchestration. Host-declared constraints are obligations, not execution permission. Omit for legacy behavior.",
+        "required":["schema_version","enabled","run_id","stage_id","snapshot_revision","independent_work","dependencies_known","required_roles","constraint_refs"],
+        "properties":{
+            "schema_version":{"const":1,"type":"integer"},"enabled":{"type":"boolean"},
+            "run_id":{"type":"string","minLength":1,"maxLength":128},
+            "stage_id":{"type":"string","minLength":1,"maxLength":128},
+            "snapshot_revision":{"type":"string","minLength":1,"maxLength":128},
+            "independent_work":{"type":"boolean"},"dependencies_known":{"type":"boolean"},
+            "required_roles":{"type":"array","uniqueItems":true,"maxItems":5,"items":{"enum":["explorer","worker","tester","researcher","reviewer"]}},
+            "constraint_refs":{"type":"array","uniqueItems":true,"maxItems":32,"items":{"type":"string","minLength":1,"maxLength":256}}
+        }
+    });
     tools
 }
 
-pub async fn call(root: &Path, name: &str, arguments: Value) -> Result<Value> {
+pub async fn call(root: &Path, name: &str, mut arguments: Value) -> Result<Value> {
     match name {
         "laya_tell_me" | "laya_advisor_preferences" => {
             runtime::ensure(root).await?;
-            runtime::rpc(root,&Request::new(if name == "laya_tell_me" {"predict"} else {"preferences"},arguments)).await
+            let mut unsupported=false;
+            if name=="laya_tell_me" && arguments.get("orchestration").is_some() {
+                let peer=runtime::rpc(root,&Request::new("status",json!({}))).await?;
+                unsupported=crate::protocol::negotiate_orchestration(&mut arguments,&peer)?;
+            }
+            let mut result=runtime::rpc(root,&Request::new(if name == "laya_tell_me" {"predict"} else {"preferences"},arguments)).await?;
+            if unsupported {result["meta"]["orchestration_status"]=json!("unsupported_service");}
+            Ok(result)
         }
         "laya_feedback" => {
             // Offline consent comes only from the service-owned durable consent marker.
@@ -143,7 +164,7 @@ pub async fn run(root: &Path) -> Result<()> {
             "initialize" => {
                 let proposed=request["params"]["protocolVersion"].as_str().unwrap_or("");
                 let version=if ["2024-11-05","2025-03-26","2025-06-18","2025-11-25"].contains(&proposed) {proposed}else{"2025-11-25"};
-                json!({"jsonrpc":"2.0","id":id,"result":{"protocolVersion":version,"capabilities":{"tools":{}},"serverInfo":{"name":"oh-my-laya","title":"Oh My Laya","version":env!("CARGO_PKG_VERSION")}}})
+                json!({"jsonrpc":"2.0","id":id,"result":{"protocolVersion":version,"capabilities":{"tools":{},"experimental":{"oh-my-laya":{"contracts":["orchestration_plan_v1"],"requires_runtime_negotiation":true}}},"serverInfo":{"name":"oh-my-laya","title":"Oh My Laya","version":env!("CARGO_PKG_VERSION")}}})
             },
             "ping" => json!({"jsonrpc":"2.0","id":id,"result":{}}),
             "tools/list" => json!({"jsonrpc":"2.0","id":id,"result":tools()}),

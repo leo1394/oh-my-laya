@@ -7,6 +7,48 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const PROTOCOL: u32 = 1;
 pub const MAX_MESSAGE: usize = 1024 * 1024;
 
+/// Missing support is a legacy peer, never proof of an available feature.
+/// Returns whether an enabled request had to fall back to the V1 path.
+pub fn negotiate_orchestration(params: &mut Value, peer: &Value) -> Result<bool> {
+    let Some(context)=params.get("orchestration") else {return Ok(false);};
+    if context.is_null() {
+        if let Some(object)=params.as_object_mut() {object.remove("orchestration");}
+        return Ok(false);
+    }
+    validate_orchestration(context)?;
+    let enabled=context.get("enabled")==Some(&Value::Bool(true));
+    let supported=peer["supported_contracts"].as_array().is_some_and(|items|items.iter().any(|item|item=="orchestration_plan_v1"));
+    if !supported || context.get("enabled")==Some(&Value::Bool(false)) {
+        if let Some(object)=params.as_object_mut() {object.remove("orchestration");}
+        return Ok(enabled);
+    }
+    Ok(false)
+}
+
+pub fn validate_orchestration(context: &Value) -> Result<()> {
+    let fields=["schema_version","enabled","run_id","stage_id","snapshot_revision","independent_work","dependencies_known","required_roles","constraint_refs"];
+    let object=context.as_object().ok_or_else(||anyhow::anyhow!("invalid: orchestration requires an object"))?;
+    if object.len()!=fields.len() || fields.iter().any(|key|!object.contains_key(*key)) {bail!("invalid: orchestration requires only the versioned context fields");}
+    if context["schema_version"].as_u64()!=Some(1) {bail!("invalid: orchestration schema_version");}
+    for key in ["enabled","independent_work","dependencies_known"] {
+        if !context[key].is_boolean() {bail!("invalid: orchestration boolean field");}
+    }
+    for key in ["run_id","stage_id","snapshot_revision"] {
+        if !context[key].as_str().is_some_and(|s|!s.trim().is_empty() && s.chars().count()<=128) {bail!("invalid: orchestration identifier");}
+    }
+    for (key,limit) in [("required_roles",5),("constraint_refs",32)] {
+        let items=context[key].as_array().ok_or_else(||anyhow::anyhow!("invalid: orchestration list"))?;
+        if items.len()>limit {bail!("invalid: orchestration list limit");}
+        let mut seen=std::collections::HashSet::new();
+        for item in items {
+            let text=item.as_str().ok_or_else(||anyhow::anyhow!("invalid: orchestration list item"))?;
+            if text.trim().is_empty() || text.chars().count()>256 || !seen.insert(text) {bail!("invalid: orchestration list item");}
+            if key=="required_roles" && !["explorer","worker","tester","researcher","reviewer"].contains(&text) {bail!("invalid: orchestration role");}
+        }
+    }
+    Ok(())
+}
+
 pub fn now() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64
 }
@@ -71,6 +113,26 @@ pub fn redact(value: &Value) -> (Value, bool) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn orchestration_negotiates_legacy_service_and_worker_without_silent_success() {
+        let context=json!({"schema_version":1,"enabled":true,"run_id":"run","stage_id":"stage","snapshot_revision":"v1","independent_work":false,"dependencies_known":true,"required_roles":[],"constraint_refs":[]});
+        let mut params=json!({"state":"task","orchestration":context});
+        assert!(negotiate_orchestration(&mut params,&json!({})).unwrap());
+        assert!(params.get("orchestration").is_none());
+        let mut disabled=json!({"state":"task","orchestration":context});
+        disabled["orchestration"]["enabled"]=json!(false);
+        assert!(!negotiate_orchestration(&mut disabled,&json!({})).unwrap());
+        assert!(disabled.get("orchestration").is_none());
+        let mut supported=json!({"orchestration":context});
+        assert!(!negotiate_orchestration(&mut supported,&json!({"supported_contracts":["orchestration_plan_v1"]})).unwrap());
+        assert_eq!(supported["orchestration"]["enabled"],true);
+        let mut null=json!({"orchestration":null});
+        assert!(!negotiate_orchestration(&mut null,&json!({})).unwrap());
+        assert!(null.get("orchestration").is_none());
+        let mut malformed=json!({"orchestration":{"enabled":false}});
+        assert!(negotiate_orchestration(&mut malformed,&json!({})).is_err());
+    }
 
     #[test]
     fn redacts_nested_secrets_not_usage() {

@@ -3,7 +3,7 @@ use anyhow::{bail, Context, Result};
 use axum::{extract::{Path as UrlPath, Query, State}, http::{HeaderMap, StatusCode}, response::{IntoResponse, Response}, routing::{get, post}, Json, Router};
 use fs2::FileExt;
 use serde_json::{json, Value};
-use std::{collections::HashMap, os::unix::fs::PermissionsExt, path::PathBuf, sync::{Arc,atomic::{AtomicBool,Ordering}}, time::Duration};
+use std::{collections::HashMap, os::unix::fs::PermissionsExt, path::PathBuf, sync::{Arc,atomic::{AtomicBool,AtomicU64,Ordering}}, time::Duration};
 use tokio::{io::{AsyncReadExt, AsyncWriteExt, BufReader}, net::{TcpListener, UnixListener}, sync::{Mutex, Notify, RwLock}};
 use crate::assets::serve as assets;
 
@@ -58,14 +58,29 @@ pub struct App {
     pub changed: Arc<Notify>,
     pub shutdown: Arc<Notify>,
     pub stopping: Arc<AtomicBool>,
+    assessment_epoch: Arc<AtomicU64>,
     sessions: Arc<Mutex<HashMap<String,i64>>>,
     pairing: Arc<Mutex<HashMap<String,i64>>>,
 }
 
 impl App {
+    async fn invalidate_assessments(&self, purge:bool) {
+        self.assessment_epoch.fetch_add(1,Ordering::SeqCst);
+        if purge && self.worker.status()["pid"].as_u64().unwrap_or(0)>0 {
+            match self.worker.call("info",json!({})).await {
+                Ok(info) if info["supported_contracts"].as_array().is_some_and(|items|items.iter().any(|item|item=="assessment_reuse_v1"))=> {
+                    if self.worker.call("clear_assessment_cache",json!({})).await.is_err() {let _=self.worker.call("release",json!({})).await;}
+                },
+                Err(_)=>{let _=self.worker.call("release",json!({})).await;},
+                _=>{},
+            }
+        }
+    }
+
     pub async fn status(&self) -> Result<Value> {
         let mut value = self.store.call("status",json!({})).await.unwrap_or_else(|error|json!({"ok":false,"degraded":true,"persistence_error":error.to_string()}));
         value["service"] = serde_json::to_value(&self.info)?;
+        value["supported_contracts"] = json!(["orchestration_plan_v1","dispatch_receipt_v1","attempt_outcome_v1"]);
         value["worker"] = self.worker.status();
         let worker_pid=value["worker"]["pid"].as_u64().unwrap_or(0);
         let pids=if worker_pid>0 {format!("{},{}",self.info.pid,worker_pid)} else {self.info.pid.to_string()};
@@ -92,12 +107,20 @@ impl App {
         let _maintenance = self.maintenance.read().await;
         let _guard = self.privacy.lock().await;
         let receipt = self.store.call("feedback", redact(&params).0).await?;
+        if receipt["status"]=="stored" && receipt["idempotent"]!=true && matches!(params["kind"].as_str(),Some("test"|"review"|"outcome"|"assignment")) {
+            self.invalidate_assessments(false).await;
+        }
         self.changed.notify_waiters();
         Ok(receipt)
     }
 
     async fn persist_snapshot(&self,method:&str,mut payload:Value)->Result<Value> {
         let _privacy=self.privacy.lock().await;
+        let expected_epoch=payload.as_object_mut().and_then(|object|object.remove("assessment_epoch"));
+        if method=="decisions/finish" && payload["result"]["meta"]["assessment_cache"]["status"]=="hit"
+            && expected_epoch.and_then(|value|value.as_u64())!=Some(self.assessment_epoch.load(Ordering::SeqCst)) {
+            bail!("stale_assessment: evidence or policy changed during reuse; retry with updated context");
+        }
         let enabled=self.store.call("settings/get",json!({})).await.map(|v|v["recording_enabled"]==true).unwrap_or_else(|_| {
             std::fs::read_to_string(self.root.join("recording-consent.json")).ok().and_then(|s|serde_json::from_str::<Value>(&s).ok()).map(|v|v["recording_enabled"]==true).unwrap_or(false)
         });
@@ -120,6 +143,8 @@ impl App {
     async fn predict(&self, request: &Request) -> Result<Value> {
         let _maintenance = self.maintenance.read().await;
         if self.stopping.load(Ordering::Acquire) {bail!("unavailable: service is stopping");}
+        if request.params.get("_cache_context").is_some()||request.params.get("memory_budget").is_some() {bail!("invalid: private assessment metadata is service-owned");}
+        let assessment_epoch=self.assessment_epoch.load(Ordering::SeqCst);
         let advisor = request.params.get("advisor").filter(|v| !v.is_null()).is_some();
         if !advisor { return self.worker.call("predict",request.params.clone()).await; }
         let mut params = request.params.clone();
@@ -141,22 +166,34 @@ impl App {
                 return Err(error);
             }
         };
+        let orchestration_unavailable=crate::protocol::negotiate_orchestration(&mut params,&info)?;
         let settings = self.store.call("settings/get",json!({})).await.unwrap_or(json!({"memory_enabled":false}));
+        let budget_requested=params["orchestration"]["enabled"]==true;
+        let budget_supported=info["supported_contracts"].as_array().is_some_and(|items|items.iter().any(|item|item=="memory_budget_v1"));
         let query = request.params["state"].as_str().map(str::to_string).unwrap_or_else(|| request.params["state"].to_string());
         let memory = if settings["memory_enabled"] == true && task_family.is_some() {
             let language=if query.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)) {"zh"} else {"en"};
             // No verified execution configuration is known before model selection.
             // Preserve exclusion reasons in the snapshot, never infer identity from Laya's checkpoint.
-            self.store.call("memory/retrieve",json!({"query":query,"configuration":{"task_family":task_family,"task_lineage":task_lineage,"language":language}})).await.unwrap_or(json!({"cases":[],"reason":"retrieval_failed"}))
+            self.store.call("memory/retrieve",json!({"query":query,"memory_budget":budget_requested&&budget_supported,"configuration":{"task_family":task_family,"task_lineage":task_lineage,"language":language}})).await.unwrap_or(json!({"cases":[],"reason":"retrieval_failed"}))
         } else if settings["memory_enabled"] == true {json!({"cases":[],"reason":"missing_task_family_scope"})}
         else { json!({"cases":[],"reason":"disabled"}) };
         params["memory_cases"] = worker_cases(&memory);
         params["model_tiers"] = settings.get("model_tiers").cloned().unwrap_or(json!({}));
+        if budget_requested&&budget_supported {params["memory_budget"]=json!(true);}
+        if params["orchestration"]["enabled"]==true && info["supported_contracts"].as_array().is_some_and(|items|items.iter().any(|item|item=="assessment_reuse_v1")) {
+            params["_cache_context"]=json!({"decision_id":id,"service_instance":self.info.instance,"epoch":assessment_epoch,"memory_version":memory["version"],"settings":settings});
+        }
         let outcome = self.worker.call("predict",params).await;
         match outcome {
             Ok(mut result) => {
+                if let Some(plan)=result.get_mut("orchestration_plan").and_then(Value::as_object_mut) {
+                    plan.insert("decision_id".into(),json!(id));
+                }
                 info=self.worker.call("info",json!({})).await.unwrap_or_else(|_|json!({"model":{"model_revision":null},"identity_error":"post-inference identity unavailable","rules_version":info["rules_version"]}));
                 let mut meta = result.get("meta").cloned().unwrap_or(json!({}));
+                if orchestration_unavailable {meta["orchestration_status"]=json!("unsupported_worker");}
+                if budget_requested&&!budget_supported {meta["memory_budget_status"]=json!("unsupported_worker");}
                 // Retain worker-reported exposure separately from retrieval selection.
                 // A missing worker report stays unknown, never inferred from retrieval.
                 meta["worker_case_ids"] = meta.get("case_ids").cloned().unwrap_or(Value::Null);
@@ -170,8 +207,13 @@ impl App {
                 meta["memory_reason"] = memory["reason"].clone();
                 meta["case_ids"] = json!(memory["cases"].as_array().into_iter().flatten().map(|case|case["id"].clone()).collect::<Vec<_>>());
                 result["meta"] = meta;
-                match self.persist_snapshot("decisions/finish",json!({"id":id,"result":result,"context":{"worker":info,"memory":memory}})).await {
+                match self.persist_snapshot("decisions/finish",json!({"id":id,"result":result,"assessment_epoch":assessment_epoch,"context":{"worker":info,"memory":memory}})).await {
                     Ok(receipt)=>{result["meta"]["recording_status"]=receipt["recording_status"].clone(); if let Some(error)=receipt.get("recording_error") {result["meta"]["recording_error"]=error.clone();}},
+                    Err(error) if error.to_string().starts_with("stale_assessment:")=> {
+                        let _=self.persist_snapshot("decisions/finish",json!({"id":id,"error":{"message":error.to_string(),"kind":"stale_assessment"}})).await;
+                        self.changed.notify_waiters();
+                        return Err(error);
+                    },
                     Err(error)=>{result["meta"]["recording_status"]=json!("not_saved");result["meta"]["recording_error"]=json!(error.to_string());},
                 }
                 self.changed.notify_waiters();
@@ -190,7 +232,20 @@ impl App {
         match request.method.as_str() {
             "status" => self.status().await,
             "predict" => self.predict(request).await,
-            "preferences" => self.worker.call("preferences",request.params.clone()).await,
+            "preferences" => {
+                let mutating=["policy","ceiling","squad"].iter().any(|key|request.params.get(*key).is_some_and(|v|!v.is_null()));
+                if mutating {
+                    let _privacy=self.privacy.lock().await;
+                    self.invalidate_assessments(false).await;
+                }
+                // Never hold the feedback lock while queued behind model inference.
+                let result=self.worker.call("preferences",request.params.clone()).await;
+                if mutating {
+                    let _privacy=self.privacy.lock().await;
+                    self.invalidate_assessments(false).await;
+                }
+                result
+            },
             "feedback" => self.feedback(request.params.clone()).await,
             "pair" => {
                 let code = uuid::Uuid::new_v4().to_string();
@@ -348,18 +403,27 @@ async fn api_write(State(app): State<App>, UrlPath(path): UrlPath<String>, heade
         ["settings"] => {
             let _guard = app.privacy.lock().await;
             let result = app.store.call("settings/update",body).await;
+            if result.is_ok() {app.invalidate_assessments(false).await;}
             match result {Ok(settings)=>write_private(&app.root.join("recording-consent.json"),&settings).map(|_|settings),Err(error)=>Err(error)}
         }
         ["decisions",_,"reviews"] => {
+            let _guard = app.privacy.lock().await;
             body=redact(&body).0;
             body["actor"]=json!({"actor_type":"human","source":"authenticated_workbench"});
-            app.store.call("reviews/create",body).await
+            let result=app.store.call("reviews/create",body).await;
+            if result.is_ok() {app.invalidate_assessments(false).await;}
+            result
         }
         ["memory-versions"] => {
             body["id"]=json!(uuid::Uuid::new_v4().to_string());
             app.store.call("versions/create",body).await
         }
-        ["memory-versions",_,"activate"] => app.store.call("versions/activate",body).await,
+        ["memory-versions",_,"activate"] => {
+            let _guard = app.privacy.lock().await;
+            let result=app.store.call("versions/activate",body).await;
+            if result.is_ok() {app.invalidate_assessments(false).await;}
+            result
+        },
         ["jobs"] => crate::evaluation::start(app.clone(),body).await,
         ["jobs",id,"cancel"] => app.store.call("jobs/update",json!({"id":id,"cancel_requested":true})).await,
         ["outbox",id,"retry"] => {
@@ -382,6 +446,7 @@ async fn api_write(State(app): State<App>, UrlPath(path): UrlPath<String>, heade
         }
         _ => Err(anyhow::anyhow!("not_found: endpoint")),
     };
+    if result.is_ok() && pieces.as_slice()!=["feedback"] {app.invalidate_assessments(true).await;}
     app.changed.notify_waiters();
     match result { Ok(value)=>Json(value).into_response(), Err(error)=>failure(error) }
 }
@@ -414,6 +479,7 @@ async fn api_delete(State(app): State<App>, UrlPath(path): UrlPath<String>, head
         ["backups",id] => app.store.call("backup/delete",json!({"id":id})).await,
         _=>Err(anyhow::anyhow!("not_found: endpoint")),
     };
+    if result.is_ok() {app.invalidate_assessments(true).await;}
     app.changed.notify_waiters();
     match result { Ok(value)=>Json(value).into_response(), Err(error)=>failure(error) }
 }
@@ -468,7 +534,7 @@ pub async fn run_with_port(root:PathBuf,port:u16)->Result<()> {
     write_private(&root.join("service.json"),&serde_json::to_value(&info)?)?;
     let python=std::env::var("LAYA_PYTHON").unwrap_or_else(|_|"python3".into());
     let idle=std::env::var("LAYA_IDLE_SECONDS").ok().and_then(|s|s.parse().ok()).unwrap_or(300);
-    let app=App {store,worker:Worker::start(python,Duration::from_secs(idle),root.join("model.lock")),root:root.clone(),info,privacy:Arc::new(Mutex::new(())),maintenance:Arc::new(RwLock::new(())),job_guard:Arc::new(Mutex::new(())),changed:Arc::new(Notify::new()),shutdown:Arc::new(Notify::new()),stopping:Arc::new(AtomicBool::new(false)),sessions:Arc::new(Mutex::new(HashMap::new())),pairing:Arc::new(Mutex::new(HashMap::new()))};
+    let app=App {store,worker:Worker::start(python,Duration::from_secs(idle),root.join("model.lock")),root:root.clone(),info,privacy:Arc::new(Mutex::new(())),maintenance:Arc::new(RwLock::new(())),job_guard:Arc::new(Mutex::new(())),changed:Arc::new(Notify::new()),shutdown:Arc::new(Notify::new()),stopping:Arc::new(AtomicBool::new(false)),assessment_epoch:Arc::new(AtomicU64::new(0)),sessions:Arc::new(Mutex::new(HashMap::new())),pairing:Arc::new(Mutex::new(HashMap::new()))};
     let internal=app.clone();
     let unix_task=tokio::spawn(async move {
         while let Ok((stream,_))=unix.accept().await {
@@ -581,7 +647,7 @@ mod tests {
     }
 
     fn app(root:&std::path::Path)->App {
-        App {store:Store::open(root).unwrap(),worker:Worker::start("nonexistent-python".into(),Duration::from_secs(1),root.join("model.lock")),root:root.into(),info:ServiceInfo{pid:1,instance:"test".into(),port:34567,protocol_version:1},privacy:Arc::new(Mutex::new(())),maintenance:Arc::new(RwLock::new(())),job_guard:Arc::new(Mutex::new(())),changed:Arc::new(Notify::new()),shutdown:Arc::new(Notify::new()),stopping:Arc::new(AtomicBool::new(false)),sessions:Arc::new(Mutex::new(HashMap::new())),pairing:Arc::new(Mutex::new(HashMap::new()))}
+        App {store:Store::open(root).unwrap(),worker:Worker::start("nonexistent-python".into(),Duration::from_secs(1),root.join("model.lock")),root:root.into(),info:ServiceInfo{pid:1,instance:"test".into(),port:34567,protocol_version:1},privacy:Arc::new(Mutex::new(())),maintenance:Arc::new(RwLock::new(())),job_guard:Arc::new(Mutex::new(())),changed:Arc::new(Notify::new()),shutdown:Arc::new(Notify::new()),stopping:Arc::new(AtomicBool::new(false)),assessment_epoch:Arc::new(AtomicU64::new(0)),sessions:Arc::new(Mutex::new(HashMap::new())),pairing:Arc::new(Mutex::new(HashMap::new()))}
     }
 
     #[tokio::test]
@@ -608,6 +674,56 @@ mod tests {
         assert_eq!(pair(State(app.clone()),headers.clone(),Json(json!({"code":"once"}))).await.status(),StatusCode::OK);
         assert_eq!(pair(State(app.clone()),headers,Json(json!({"code":"once"}))).await.status(),StatusCode::UNAUTHORIZED);
         assert!(app.internal(&Request::new("versions/activate",json!({"id":"arbitrary"}))).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn stale_assessment_finish_is_atomic_with_epoch_and_never_queues_result() {
+        for recording in [false,true] {
+            let dir=tempfile::tempdir().unwrap(); let app=app(dir.path());
+            if recording {app.store.call("settings/update",json!({"recording_enabled":true})).await.unwrap();}
+            let stale_id=if recording {"stale-recorded"}else{"stale-unrecorded"};
+            app.persist_snapshot("decisions/begin",json!({"id":stale_id,"request_id":stale_id,"request":{"state":"stale"}})).await.unwrap();
+
+            let privacy=app.privacy.lock().await;
+            let gate=Arc::new(tokio::sync::Barrier::new(2));
+            let task_app=app.clone(); let task_gate=gate.clone();
+            let finish=tokio::spawn(async move {
+                task_gate.wait().await;
+                task_app.persist_snapshot("decisions/finish",json!({
+                    "id":stale_id,"assessment_epoch":0,
+                    "result":{"value":"must-not-persist","meta":{"assessment_cache":{"status":"hit"}}}
+                })).await
+            });
+            gate.wait().await;
+            app.assessment_epoch.fetch_add(1,Ordering::SeqCst);
+            drop(privacy);
+
+            let error=finish.await.unwrap().unwrap_err();
+            assert!(error.to_string().starts_with("stale_assessment:"));
+            assert_eq!(Outbox::open(dir.path()).unwrap().status().unwrap()["pending_snapshots"],0);
+            app.persist_snapshot("decisions/finish",json!({"id":stale_id,"error":{"message":error.to_string(),"kind":"stale_assessment"}})).await.unwrap();
+            assert_eq!(Outbox::open(dir.path()).unwrap().status().unwrap()["pending_snapshots"],0);
+            if recording {
+                let detail=app.store.call("decisions/get",json!({"id":stale_id})).await.unwrap();
+                assert!(detail["result"].is_null());
+                assert_eq!(detail["error"]["kind"],"stale_assessment");
+            } else {
+                assert_eq!(app.store.call("status",json!({})).await.unwrap()["counts"]["decisions"],0);
+            }
+
+            let matching_id=if recording {"matching-recorded"}else{"matching-unrecorded"};
+            app.persist_snapshot("decisions/begin",json!({"id":matching_id,"request_id":matching_id,"request":{"state":"matching"}})).await.unwrap();
+            let receipt=app.persist_snapshot("decisions/finish",json!({
+                "id":matching_id,"assessment_epoch":1,
+                "result":{"value":"fresh","meta":{"assessment_cache":{"status":"hit"}}}
+            })).await.unwrap();
+            assert_eq!(receipt["recording_status"],if recording {"stored"}else{"not_recorded"});
+            assert_eq!(Outbox::open(dir.path()).unwrap().status().unwrap()["pending_snapshots"],0);
+            if recording {
+                let detail=app.store.call("decisions/get",json!({"id":matching_id})).await.unwrap();
+                assert_eq!(detail["result"]["value"],"fresh");
+            }
+        }
     }
 
     #[test]

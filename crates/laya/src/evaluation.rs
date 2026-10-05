@@ -1,7 +1,7 @@
-use crate::{protocol::{hash, now}, service::{App,worker_cases}, store::{EVALUATOR_IDENTITY,RETRIEVAL_POLICY_VERSION}};
+use crate::{protocol::{hash, now}, service::{App,worker_cases}, store::{EVALUATOR_IDENTITY,BUDGET_EVALUATOR_IDENTITY,MEMORY_INPUT_POLICY,RETRIEVAL_POLICY_VERSION}};
 use anyhow::{bail, Context, Result};
 use serde_json::{json,Value};
-use std::{os::unix::fs::PermissionsExt,path::{Path,PathBuf}};
+use std::{collections::HashSet,os::unix::fs::PermissionsExt,path::{Path,PathBuf}};
 use tokio::io::AsyncWriteExt;
 
 const BASELINE: &str=include_str!("../../../evals/advisor/baseline-v1.json");
@@ -41,26 +41,33 @@ async fn checkpoint(app:&App,id:&str) -> Result<()> {
 
 async fn evaluate(app:&App,id:&str,input:&Value) -> Result<Value> {
     let version=input["version_id"].as_str().context("invalid: version_id required")?;
+    let memory_budget=match input.get("memory_budget") {None=>false,Some(value)=>value.as_bool().context("invalid: memory_budget must be boolean")?};
     let candidate=app.store.call("versions/get",json!({"id":version})).await?;
     let settings=app.store.call("settings/get",json!({})).await?;
     let current=settings["active_memory_version"].as_str().map(str::to_string);
+    let current_budget=if let Some(version)=current.as_deref() {
+        app.store.call("versions/get",json!({"id":version})).await?["evaluation"]["evaluator_identity"]==BUDGET_EVALUATOR_IDENTITY
+    }else{memory_budget};
     let baseline:Value=serde_json::from_str(BASELINE)?;
     let worker_info=app.worker.call("info",json!({})).await?;
+    if (memory_budget||current_budget)&&!worker_info["supported_contracts"].as_array().is_some_and(|items|items.iter().any(|item|item=="memory_budget_v1")) {bail!("unsupported: evaluator requires checkpoint-token case budgeting");}
     let mut rows=Vec::new();
     let cases=baseline["cases"].as_array().context("baseline cases")?;
     for (index,case) in cases.iter().enumerate() {
         checkpoint(app,id).await?;
         let mut runs=Vec::new();
-        for version_id in [None,current.as_deref(),Some(version)] {
+        for (version_id,run_budget) in [(None,memory_budget),(current.as_deref(),current_budget),(Some(version),memory_budget)] {
             checkpoint(app,id).await?;
             let configuration=json!({"task_family":case["family"],"task_lineage":case["lineage"],"language":case["language"]});
             let memory=if let Some(v)=version_id {
-                app.store.call("memory/retrieve",json!({"query":case["state"],"version":v,"evaluation":true,"exclude_ids":[case["id"]],"configuration":configuration})).await?
+                app.store.call("memory/retrieve",json!({"query":case["state"],"version":v,"evaluation":true,"memory_budget":run_budget,"exclude_ids":[case["id"]],"configuration":configuration})).await?
             } else {json!({"version":null,"cases":[],"reason":"no_memory_version"})};
             let start=std::time::Instant::now();
             // Synthetic catalog is an evaluation fixture, not an available host model list.
-            let result=app.worker.call("predict",json!({"state":case["state"],"advisor":{"models":[{"id":"evaluation-fixture","reasoning_efforts":["low","medium","high"]}],"current_model":"evaluation-fixture"},"memory_cases":worker_cases(&memory)})).await?;
-            runs.push(json!({"result":result,"latency_ms":start.elapsed().as_millis(),"case_ids":memory["cases"].as_array().map(|a|a.iter().map(|v|v["id"].clone()).collect::<Vec<_>>()).unwrap_or_default(),"retrieval":{"configuration":configuration,"reason":memory["reason"],"version":memory["version"]}}));
+            let mut params=json!({"state":case["state"],"advisor":{"models":[{"id":"evaluation-fixture","reasoning_efforts":["low","medium","high"]}],"current_model":"evaluation-fixture"},"memory_cases":worker_cases(&memory)});
+            if run_budget {params["memory_budget"]=json!(true);}
+            let result=app.worker.call("predict",params).await?;
+            runs.push(json!({"result":result,"memory_budget_required":run_budget,"checkpoint_digest":worker_info["model"]["checkpoint_digest"],"latency_ms":start.elapsed().as_millis(),"case_ids":memory["cases"].as_array().map(|a|a.iter().map(|v|v["id"].clone()).collect::<Vec<_>>()).unwrap_or_default(),"retrieval":{"configuration":configuration,"reason":memory["reason"],"version":memory["version"]}}));
         }
         rows.push(json!({"id":case["id"],"family":case["family"],"task_lineage":case["lineage"],"language":case["language"],"expected":case["labels"],"runs":runs}));
         app.store.call("jobs/update",json!({"id":id,"progress":{"completed":index+1,"total":cases.len()}})).await?;
@@ -79,7 +86,8 @@ async fn evaluate(app:&App,id:&str,input:&Value) -> Result<Value> {
     report["evaluated_at"]=json!(now());
     report["current_version"]=json!(current);
     report["scope"]=json!("fixed local regression set; not proof of general capability improvement");
-    report["evaluator_identity"]=json!(EVALUATOR_IDENTITY);
+    report["evaluator_identity"]=json!(if memory_budget {BUDGET_EVALUATOR_IDENTITY}else{EVALUATOR_IDENTITY});
+    if memory_budget {report["input_policy"]=json!(MEMORY_INPUT_POLICY);}
     report["retrieval_policy_version"]=json!(RETRIEVAL_POLICY_VERSION);
     app.store.call("versions/report",json!({"id":version,"report":report})).await?;
     Ok(report)
@@ -99,7 +107,40 @@ fn valid_suggestion(run:&Value)->bool {
 fn verified_case_ids(run:&Value)->Option<&Vec<Value>> {
     let selected=run["case_ids"].as_array()?;
     let received=run["result"]["meta"]["case_ids"].as_array()?;
-    if selected==received && received.iter().all(Value::is_string) {Some(received)} else {None}
+    let Some(receipt)=run["result"]["meta"].get("memory_receipt") else {
+        return if run["memory_budget_required"]!=true&&selected==received&&received.iter().all(Value::is_string) {Some(received)}else{None};
+    };
+    if receipt["contract"]!="memory_receipt_v1"||receipt["policy_version"]!="whole-case-token-budget-v1"
+        ||receipt["unit"]!="checkpoint_tokens"||receipt["max_cases"]!=2||receipt["complete_base_state"]!=true
+        ||receipt["usage_scope"]!="current_evaluation"||receipt["selected_case_ids"]!=run["case_ids"]
+        ||receipt["received_case_ids"]!=run["result"]["meta"]["case_ids"] {return None;}
+    if selected.len()>3||received.len()>2||!selected.starts_with(received)
+        ||selected.iter().any(|id|id.as_str().is_none_or(|id|id.trim().is_empty()))
+        ||selected.iter().filter_map(Value::as_str).collect::<HashSet<_>>().len()!=selected.len() {return None;}
+    let room=receipt["available_state_tokens"].as_u64()?;
+    let base=receipt["base_state_tokens"].as_u64()?;
+    let packed=receipt["packed_state_tokens"].as_u64()?;
+    if base>room||packed>room||received.is_empty()&&packed!=base {return None;}
+    let fingerprint=receipt["input_fingerprint"].as_str()?;
+    if fingerprint.len()!=64||!fingerprint.bytes().all(|byte|byte.is_ascii_hexdigit()) {return None;}
+    let identity=&receipt["checkpoint_identity"];
+    if identity["identity_scope"]!="full_checkpoint_content"||identity["checkpoint_digest"].as_str()?.is_empty() {return None;}
+    if run["memory_budget_required"]==true&&run["checkpoint_digest"]!=identity["checkpoint_digest"] {return None;}
+    let excluded=receipt["excluded"].as_array()?;
+    if excluded.len()!=selected.len()-received.len() {return None;}
+    let mut seen=HashSet::new();
+    for item in excluded {
+        let id=item["case_id"].as_str()?;
+        let index=selected.iter().position(|value|value==id)?;
+        if index<received.len()||!seen.insert(id) {return None;}
+        let required=item.get("required_state_tokens")?;
+        match item["reason"].as_str()? {
+            "case_limit" if index>=2&&required.is_null()=>{},
+            "token_budget" if index<2&&required.as_u64().is_some_and(|count|count>room)=>{},
+            _=>return None,
+        }
+    }
+    Some(received)
 }
 
 pub fn score(rows:&[Value],minimum:usize)->Value {
@@ -222,6 +263,22 @@ async fn export(app:&App,id:&str)->Result<Value> {
 mod tests {
     use super::*;
     fn run(ask:bool,model:&str,effort:&str)->Value {json!({"result":{"meta":{"case_ids":["eligible"]},"laya_result":{"answers":{"complexity":{"choice":"low"},"risk":{"choice":"low"},"certainty":{"choice":"uncertain"}}},"advice":{"ask_user":ask,"recommendation":{"model":model,"reasoning_effort":effort},"delegation":{"parent_model_switched":false}}},"case_ids":["eligible"]})}
+    fn memory_run(selected:&[&str],received:&[&str])->Value {
+        let mut value=run(true,"evaluation-fixture","high");
+        value["memory_budget_required"]=json!(true);
+        value["checkpoint_digest"]=json!("fixture-digest");
+        value["case_ids"]=json!(selected);
+        value["result"]["meta"]["case_ids"]=json!(received);
+        let excluded=selected.iter().skip(received.len()).map(|id|json!({"case_id":id,"reason":"token_budget","required_state_tokens":101})).collect::<Vec<_>>();
+        value["result"]["meta"]["memory_receipt"]=json!({
+            "contract":"memory_receipt_v1","policy_version":"whole-case-token-budget-v1","unit":"checkpoint_tokens",
+            "max_cases":2,"complete_base_state":true,"usage_scope":"current_evaluation","input_fingerprint":"a".repeat(64),
+            "checkpoint_identity":{"checkpoint_digest":"fixture-digest","identity_scope":"full_checkpoint_content"},
+            "selected_case_ids":selected,"received_case_ids":received,"excluded":excluded,
+            "available_state_tokens":100,"base_state_tokens":10,"packed_state_tokens":if received.is_empty(){10}else{80}
+        });
+        value
+    }
     fn row(runs:Vec<Value>)->Value {json!({"expected":{"complexity":"low","risk":"low","certainty":"uncertain"},"runs":runs})}
     #[test]
     fn empty_evaluation_never_passes() {assert_eq!(score(&[],16)["passed"],false);}
@@ -243,6 +300,56 @@ mod tests {
     fn safe_three_run_fixture_can_pass() {
         let report=score(&[row(vec![run(true,"evaluation-fixture","low"),run(true,"evaluation-fixture","medium"),run(true,"evaluation-fixture","high")])],1);
         assert_eq!(report["passed"],true);
+    }
+    #[test]
+    fn verified_memory_receipt_counts_only_the_received_prefix() {
+        let candidate=memory_run(&["eligible","dropped"],&["eligible"]);
+        assert_eq!(verified_case_ids(&candidate),candidate["result"]["meta"]["case_ids"].as_array());
+        let report=score(&[row(vec![run(true,"evaluation-fixture","low"),run(true,"evaluation-fixture","medium"),candidate])],1);
+        assert_eq!(report["candidate_memory_exposure"],1); assert_eq!(report["invalid_outputs"],0); assert_eq!(report["passed"],true);
+    }
+    #[test]
+    fn case_limit_exclusion_requires_an_explicit_null_count() {
+        let mut candidate=memory_run(&["first","second","third"],&["first","second"]);
+        candidate["result"]["meta"]["memory_receipt"]["excluded"][0]=json!({"case_id":"third","reason":"case_limit","required_state_tokens":null});
+        assert!(verified_case_ids(&candidate).is_some());
+        candidate["result"]["meta"]["memory_receipt"]["excluded"][0]["required_state_tokens"]=json!(101);
+        assert!(verified_case_ids(&candidate).is_none());
+    }
+    #[test]
+    fn required_memory_receipt_fails_closed_while_unflagged_legacy_remains_valid() {
+        let legacy=run(true,"evaluation-fixture","low");
+        assert!(verified_case_ids(&legacy).is_some());
+        let mut required=legacy.clone(); required["memory_budget_required"]=json!(true);
+        assert!(verified_case_ids(&required).is_none());
+    }
+    #[test]
+    fn invalid_memory_receipt_evidence_never_counts_as_exposure() {
+        let mut invalid=Vec::new();
+        let mut non_prefix=memory_run(&["first","second"],&["second"]);
+        non_prefix["result"]["meta"]["memory_receipt"]["excluded"][0]["case_id"]=json!("first"); invalid.push(non_prefix);
+        let mut missing_exclusion=memory_run(&["first","second"],&["first"]);
+        missing_exclusion["result"]["meta"]["memory_receipt"]["excluded"]=json!([]); invalid.push(missing_exclusion);
+        let mut reused=memory_run(&["first"],&["first"]);
+        reused["result"]["meta"]["memory_receipt"]["usage_scope"]=json!("source_evaluation"); invalid.push(reused);
+        let mut missing_identity=memory_run(&["first"],&["first"]);
+        missing_identity["result"]["meta"]["memory_receipt"].as_object_mut().unwrap().remove("checkpoint_identity"); invalid.push(missing_identity);
+        let mut identity_mismatch=memory_run(&["first"],&["first"]);
+        identity_mismatch["checkpoint_digest"]=json!("another-digest"); invalid.push(identity_mismatch);
+        let mut invalid_count=memory_run(&["first"],&["first"]);
+        invalid_count["result"]["meta"]["memory_receipt"]["packed_state_tokens"]=json!(101); invalid.push(invalid_count);
+        for candidate in invalid {
+            assert!(verified_case_ids(&candidate).is_none());
+            let report=score(&[row(vec![run(true,"evaluation-fixture","low"),run(true,"evaluation-fixture","medium"),candidate])],1);
+            assert_eq!(report["candidate_memory_exposure"],0); assert_eq!(report["passed"],false);
+        }
+    }
+    #[test]
+    fn valid_zero_received_receipt_never_satisfies_exposure_gate() {
+        let candidate=memory_run(&["dropped"],&[]);
+        assert!(verified_case_ids(&candidate).is_some());
+        let report=score(&[row(vec![run(true,"evaluation-fixture","low"),run(true,"evaluation-fixture","medium"),candidate])],1);
+        assert_eq!(report["candidate_memory_exposure"],0); assert_eq!(report["passed"],false);
     }
     #[test]
     fn no_candidate_memory_exposure_never_passes() {

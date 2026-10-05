@@ -305,7 +305,7 @@ async fn schema_one_database_migrates_and_reopens_with_evidence() {
     let store=Store::open(root.path()).unwrap();
     store.call("settings/update",json!({"recording_enabled":true})).await.unwrap();
     store.call("decisions/begin",json!({"request_id":"r","id":"d","request":{"state":large("migrated-")}})).await.unwrap();
-    assert_eq!(store.call("status",json!({})).await.unwrap()["schema_version"],4);
+    assert_eq!(store.call("status",json!({})).await.unwrap()["schema_version"],5);
     drop(store);
     let reopened=Store::open(root.path()).unwrap();
     assert!(reopened.call("decisions/get",json!({"id":"d"})).await.unwrap()["request"]["state"].as_str().unwrap().starts_with("migrated-"));
@@ -355,7 +355,7 @@ async fn schema_one_backup_is_migrated_during_restore() {
     Connection::open(root.path().join("laya.sqlite3")).unwrap().execute("INSERT INTO backups(id,relative_path,sha256,schema_version,created_at) VALUES('legacy','backups/legacy.sqlite3',?1,1,1)",[digest]).unwrap();
     store.call("backup/restore",json!({"id":"legacy"})).await.unwrap();
     assert_eq!(store.call("decisions/get",json!({"id":"legacy"})).await.unwrap()["request"]["state"],"legacy backup");
-    assert_eq!(store.call("status",json!({})).await.unwrap()["schema_version"],4);
+    assert_eq!(store.call("status",json!({})).await.unwrap()["schema_version"],5);
 }
 
 #[tokio::test]
@@ -394,7 +394,7 @@ async fn external_derived_case_context_stays_withdrawn_after_old_backup_restore(
     let scrubbed=store.call("decisions/get",json!({"id":"consumer"})).await.unwrap();
     assert!(scrubbed["context"]["memory"]["case_ids"].as_array().unwrap().is_empty());
     assert!(scrubbed["context"]["memory"]["cases"].as_array().unwrap().is_empty());
-    assert_eq!(scrubbed["context"]["evidence_withdrawn"][0],case_id);
+    assert_eq!(scrubbed["context"]["evidence_withdrawn"],true);
     let connection=Connection::open(root.path().join("laya.sqlite3")).unwrap();
     assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE id=?1",[&old_artifact_id],|row|row.get(0)).unwrap(),0);
     drop(connection);
@@ -402,7 +402,7 @@ async fn external_derived_case_context_stays_withdrawn_after_old_backup_restore(
     let restored=store.call("decisions/get",json!({"id":"consumer"})).await.unwrap();
     assert!(restored["context"]["memory"]["case_ids"].as_array().unwrap().is_empty());
     assert!(restored["context"]["memory"]["cases"].as_array().unwrap().is_empty());
-    assert_eq!(restored["context"]["evidence_withdrawn"][0],case_id);
+    assert_eq!(restored["context"]["evidence_withdrawn"],true);
     assert!(store.call("decisions/get",json!({"id":"source"})).await.unwrap_err().to_string().starts_with("not_found:"));
     assert!(!root.path().join(old_relative).exists());
 }

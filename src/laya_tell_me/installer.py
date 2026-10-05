@@ -188,7 +188,7 @@ ALPHA_SQUAD_REPOSITORY = "https://github.com/leo1394/skill-alpha-squad-coding-cr
 ALPHA_SQUAD_ARCHIVE = "https://codeload.github.com/leo1394/skill-alpha-squad-coding-craft/zip/HEAD"
 ALPHA_SQUAD_PATH = Path("skills") / "alpha-squad-coding-craft"
 # Keep the archive fallback in sync with the submodule gitlink.
-ALPHA_SQUAD_REVISION = "b5af3da99924756089e250c8930dd7d3553fbd47"
+ALPHA_SQUAD_REVISION = "11a0a2bbceb362903901ce89d9493eeda4cefa90"
 MAX_ALPHA_ARCHIVE_BYTES = 20 * 1024 * 1024
 MAX_ALPHA_EXTRACTED_BYTES = 100 * 1024 * 1024
 MAX_ALPHA_FILES = 1000
