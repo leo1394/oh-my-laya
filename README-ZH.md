@@ -1,14 +1,13 @@
-![Oh My Laya — Reflect. Route. Refine.](assets/readme/product-banner.svg)
-
 # Oh My Laya
-
-[English](README.md) | [简体中文](README-ZH.md)
-
+![Oh My Laya — Reflect. Route. Refine.](assets/readme/product-banner.svg)
 **为你的 AI Agent 提供原生 Laya 决策。** 将 [Laya-MLX](https://github.com/mizorewww/laya-mlx) 接入 Codex、Claude Code、DeepSeek Harness（DSH）和 pi-agent：简单任务直接完成，必要子任务在授权内分配模型，再从经过复核的反馈中积累经验。适用于研究、分析、规划、编码等 Agent 任务，不限于软件开发。
 
 - **Reflect · 判断。** 本地推理直接返回分类、评分和概率，不需要生成文本再解析。
 - **Route · 分配。** 配合 [Alpha Squad](https://github.com/leo1394/skill-alpha-squad-coding-craft)，按需选择角色、模型与推理档位，主会话模型保持不变。
 - **Refine · 改进。** 保留首次评分，复核不明确的决策；案例经过评估与明确启用后，才能辅助未来建议。
+
+
+[English](README.md) | [简体中文](README-ZH.md)
 
 ## 一键安装
 

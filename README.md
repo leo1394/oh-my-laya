@@ -1,14 +1,13 @@
-![Oh My Laya — Reflect. Route. Refine.](assets/readme/product-banner.svg)
 
 # Oh My Laya
-
-[English](README.md) | [简体中文](README-ZH.md)
-
+![Oh My Laya — Reflect. Route. Refine.](assets/readme/product-banner.svg)
 **Native Laya decisions for your AI agents.** Integrate [Laya-MLX](https://github.com/mizorewww/laya-mlx) with Codex, Claude Code, DeepSeek Harness (DSH), and pi-agent: keep simple work with the main agent, route useful subtasks within your model limits, and learn from reviewed feedback. Use it for research, analysis, planning, coding, and other agent tasks.
 
 - **Reflect.** Get structured classifications, scores, and probabilities directly from local inference—not generated text to parse.
 - **Route.** Pair with [Alpha Squad](https://github.com/leo1394/skill-alpha-squad-coding-craft) to select necessary roles and model/reasoning combinations. Your main model stays unchanged.
 - **Refine.** Preserve first scores, inspect uncertain decisions, and review cases before evaluating and activating them for future advice.
+
+[English](README.md) | [简体中文](README-ZH.md)
 
 ## Install
 
