@@ -1,6 +1,5 @@
-
-# Oh My Laya
 ![Oh My Laya — Reflect. Route. Refine.](assets/readme/product-banner.svg)
+# Oh My Laya
 **Native Laya decisions for your AI agents.** Integrate [Laya-MLX](https://github.com/mizorewww/laya-mlx) with Codex, Claude Code, DeepSeek Harness (DSH), and pi-agent: keep simple work with the main agent, route useful subtasks within your model limits, and learn from reviewed feedback. Use it for research, analysis, planning, coding, and other agent tasks.
 
 - **Reflect.** Get structured classifications, scores, and probabilities directly from local inference—not generated text to parse.
