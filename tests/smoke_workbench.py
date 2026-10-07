@@ -94,14 +94,20 @@ def main():
             with ThreadPoolExecutor(max_workers=3) as clients:
                 replies = list(clients.map(lambda n: rpc("predict", {"state": f"parallel {n}", "questions": {"risk": {}}}), range(3)))
             assert len(replies) == 3
+            for result in replies:
+                assert result["meta"]["recording_status"] == "stored", result
+                detail = http(f"/api/v1/decisions/{result['meta']['decision_id']}")
+                assert detail["result"] == result
             worker_pid = rpc("status")["worker"]["pid"]
             assert worker_pid > 0
             try:
-                rpc("predict", {"state": "fixture:crash", "questions": {"risk": {}}})
+                rpc("predict", {"state": "fixture:crash", "questions": {"risk": {}}}, "typed-crash")
                 raise AssertionError("Worker crash was hidden")
             except RuntimeError:
                 pass
             assert rpc("status")["worker"]["pid"] == 0
+            assert http("/api/v1/decisions/typed-crash")["error"] is not None
+            http("/api/v1/decisions/typed-crash", method="DELETE")
             decision = rpc("predict", {"state": "Check a rollback migration", "advisor": {"models": [], "task_family": "migration", "task_lineage": "smoke-rollback-review"}}, "decision-smoke")
             assert decision["meta"]["recording_status"] == "stored", decision
             tester = {"protocol_version": 1, "event_id": "tester-pass", "decision_id": "decision-smoke", "attempt_ref": "attempt-1",
@@ -218,7 +224,7 @@ def main():
             with opener.open(artifact_url) as response:
                 records = [json.loads(line) for line in response]
             assert records[0]["type"] == "manifest"
-            assert len(records) == 3
+            assert len(records) == 3 + len(replies), records
             backup = http("/api/v1/backups", {})
             http("/api/v1/decisions/decision-smoke", method="DELETE")
             try:

@@ -146,7 +146,6 @@ impl App {
         if request.params.get("_cache_context").is_some()||request.params.get("memory_budget").is_some() {bail!("invalid: private assessment metadata is service-owned");}
         let assessment_epoch=self.assessment_epoch.load(Ordering::SeqCst);
         let advisor = request.params.get("advisor").filter(|v| !v.is_null()).is_some();
-        if !advisor { return self.worker.call("predict",request.params.clone()).await; }
         let mut params = request.params.clone();
         let (task_family,task_lineage)=take_advisor_routing_scope(&mut params)?;
         let id = request.request_id.clone();
@@ -171,15 +170,18 @@ impl App {
         let budget_requested=params["orchestration"]["enabled"]==true;
         let budget_supported=info["supported_contracts"].as_array().is_some_and(|items|items.iter().any(|item|item=="memory_budget_v1"));
         let query = request.params["state"].as_str().map(str::to_string).unwrap_or_else(|| request.params["state"].to_string());
-        let memory = if settings["memory_enabled"] == true && task_family.is_some() {
+        let memory = if !advisor {json!({"cases":[],"reason":"not_advisor"})}
+        else if settings["memory_enabled"] == true && task_family.is_some() {
             let language=if query.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)) {"zh"} else {"en"};
             // No verified execution configuration is known before model selection.
             // Preserve exclusion reasons in the snapshot, never infer identity from Laya's checkpoint.
             self.store.call("memory/retrieve",json!({"query":query,"memory_budget":budget_requested&&budget_supported,"configuration":{"task_family":task_family,"task_lineage":task_lineage,"language":language}})).await.unwrap_or(json!({"cases":[],"reason":"retrieval_failed"}))
         } else if settings["memory_enabled"] == true {json!({"cases":[],"reason":"missing_task_family_scope"})}
         else { json!({"cases":[],"reason":"disabled"}) };
-        params["memory_cases"] = worker_cases(&memory);
-        params["model_tiers"] = settings.get("model_tiers").cloned().unwrap_or(json!({}));
+        if advisor {
+            params["memory_cases"] = worker_cases(&memory);
+            params["model_tiers"] = settings.get("model_tiers").cloned().unwrap_or(json!({}));
+        }
         if budget_requested&&budget_supported {params["memory_budget"]=json!(true);}
         if params["orchestration"]["enabled"]==true && info["supported_contracts"].as_array().is_some_and(|items|items.iter().any(|item|item=="assessment_reuse_v1")) {
             params["_cache_context"]=json!({"decision_id":id,"service_instance":self.info.instance,"epoch":assessment_epoch,"memory_version":memory["version"],"settings":settings});
@@ -648,6 +650,33 @@ mod tests {
 
     fn app(root:&std::path::Path)->App {
         App {store:Store::open(root).unwrap(),worker:Worker::start("nonexistent-python".into(),Duration::from_secs(1),root.join("model.lock")),root:root.into(),info:ServiceInfo{pid:1,instance:"test".into(),port:34567,protocol_version:1},privacy:Arc::new(Mutex::new(())),maintenance:Arc::new(RwLock::new(())),job_guard:Arc::new(Mutex::new(())),changed:Arc::new(Notify::new()),shutdown:Arc::new(Notify::new()),stopping:Arc::new(AtomicBool::new(false)),assessment_epoch:Arc::new(AtomicU64::new(0)),sessions:Arc::new(Mutex::new(HashMap::new())),pairing:Arc::new(Mutex::new(HashMap::new()))}
+    }
+
+    #[tokio::test]
+    async fn typed_decisions_obey_recording_consent_and_preserve_results() {
+        for recording in [false,true] {
+            let dir=tempfile::tempdir().unwrap(); let mut app=app(dir.path());
+            let fixture=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/workbench_worker.py");
+            app.worker=Worker::start(fixture.to_string_lossy().into_owned(),Duration::ZERO,dir.path().join("model.lock"));
+            app.store.call("settings/update",json!({"recording_enabled":recording})).await.unwrap();
+            let request=Request::new("predict",json!({"state":"typed capture regression","questions":{"risk":{"type":"choice","instructions":"Classify risk","criteria":["low","high"]}}}));
+            let result=app.predict(&request).await.unwrap();
+            app.worker.call("release",json!({})).await.unwrap();
+            assert_eq!(result["meta"]["decision_id"],request.request_id);
+            assert_eq!(result["meta"]["recording_status"],if recording {"stored"}else{"not_recorded"});
+            if recording {
+                let stored=app.store.call("decisions/get",json!({"id":request.request_id})).await.unwrap();
+                assert_eq!(stored["request"],request.params);
+                assert_eq!(stored["result"],result);
+                assert_eq!(app.predict(&request).await.unwrap(),result);
+                let failed=Request::new("predict",json!({"state":"fixture:crash","questions":request.params["questions"]}));
+                assert!(app.predict(&failed).await.is_err());
+                let stored=app.store.call("decisions/get",json!({"id":failed.request_id})).await.unwrap();
+                assert!(!stored["error"].is_null());
+            } else {
+                assert!(app.store.call("decisions/get",json!({"id":request.request_id})).await.is_err());
+            }
+        }
     }
 
     #[tokio::test]
