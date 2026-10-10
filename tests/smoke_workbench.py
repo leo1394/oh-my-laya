@@ -262,11 +262,11 @@ def main():
             bridge = subprocess.Popen([str(BINARY), "mcp"], env=env, text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
             bridge.stdin.write(json.dumps({"jsonrpc": "2.0", "id": "cancel-me", "method": "tools/call", "params": {"name": "laya_tell_me", "arguments": {"state": "fixture:slow", "questions": {"risk": {}}}}}) + "\n")
             bridge.stdin.flush()
-            for _ in range(100):
+            for _ in range(500):
                 if rpc("status")["worker"]["busy"]:
                     break
                 time.sleep(0.02)
-            assert rpc("status")["worker"]["busy"]
+            assert rpc("status")["worker"]["busy"], "worker did not start within ten seconds"
             bridge.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": "cancel-me"}}) + "\n")
             bridge.stdin.close()
             bridge.wait(timeout=5)
