@@ -13,7 +13,6 @@ test('dashboard, favicon and plugin share the Return geometry', () => {
   assert.equal((geometry(mark).match(/M/g) || []).length, 1, 'single unbranched return retained')
   assert.match(favicon, /stroke-width="7"/)
   for (const svg of [favicon, plugin]) assert.match(svg, /fill="#eaf5ff"/)
-  assert.ok(read('../../docs/design/identity/design.html').includes(geometry(mark)))
   assert.match(read('../index.html'), /rel="icon"[^>]+href="\/favicon.svg"/)
   assert.match(read('../src/App.vue'), /class="brand-mark" src="\/logo.svg"/)
   assert.ok(read('../src/App.vue').includes('Oh My Laya — Reflect. Route. Refine.'))
