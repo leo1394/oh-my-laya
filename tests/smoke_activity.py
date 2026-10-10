@@ -107,6 +107,14 @@ class ActivitySmokeTests(unittest.TestCase):
                 denied.exception.close()
                 service.pair()
                 empty = service.http(path)
+                # Startup retention runs asynchronously and advances the privacy revision.
+                # Establish the baseline after maintenance, not before it races a decision.
+                for _ in range(100):
+                    if empty["privacy_revision"] != "none":
+                        break
+                    time.sleep(0.05)
+                    empty = service.http(path)
+                self.assertNotEqual(empty["privacy_revision"], "none", "startup retention did not finish")
                 self.assertEqual(empty["scope"], "recorded_decisions")
                 self.assertEqual(empty["items_scope"], "selected_recorded_decisions")
                 self.assertFalse(empty["recording_enabled"])
