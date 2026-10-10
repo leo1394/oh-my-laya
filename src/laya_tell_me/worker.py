@@ -229,6 +229,27 @@ def _preferences(params):
 
 
 def _dispatch(method, params):
+    if method == "configure_preferences":
+        # Browser-confirmed preferences are not a host-verified model catalog.
+        if set(params) != {"confirmed", "policy", "ceiling", "squad"} or params["confirmed"] is not True:
+            raise ValueError("configuration requires explicit confirmation and all preference fields")
+        if params["policy"] not in ("always", "conditional", "auto"):
+            raise ValueError("invalid advisor policy")
+        server.validate_squad(params["squad"])
+        if params["policy"] == "auto":
+            server.validate_ceiling(params["ceiling"])
+        elif params["ceiling"] is not None:
+            raise ValueError("ceiling is only used by auto policy")
+        for pair in (params["ceiling"], params["squad"]["reviewer"]):
+            if pair is not None:
+                server.validate_ceiling(pair)
+                if len(pair["model"]) > 128 or pair["model"] != pair["model"].strip():
+                    raise ValueError("model must be a trimmed identifier up to 128 characters")
+                if pair["reasoning_effort"] not in ("low", "medium", "high", "xhigh"):
+                    raise ValueError("advanced reasoning requires setup in the host")
+        result = server.preferences(params["policy"], ceiling=params["ceiling"], squad=params["squad"])
+        _assessment_cache.clear()
+        return result, False
     if method == "clear_assessment_cache":
         if params:
             raise ValueError("clear_assessment_cache does not accept parameters")

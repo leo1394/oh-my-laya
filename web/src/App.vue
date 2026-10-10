@@ -9,6 +9,7 @@ import MemoryVersion from './MemoryVersion.vue'
 import ImpactOverview from './ImpactOverview.vue'
 import ExecutionEvidence from './ExecutionEvidence.vue'
 import DateRangePicker from './DateRangePicker.vue'
+import SquadRouting from './SquadRouting.vue'
 import {
   dateRangeBounds,
   decisionQuery,
@@ -249,7 +250,7 @@ async function loadSettings() {
     load('advisorPreferences', () => api('/advisor-preferences'))
   ])
   if (outboxPayload) outbox.value = normalizeList(outboxPayload)
-  if (preferencesPayload) advisorPreferences.value = preferencesPayload
+  advisorPreferences.value = preferencesPayload || null
   if (settingsPayload) {
     settings.value = settingsPayload.settings || settingsPayload
     settingsDraft.retention_days = settings.value.retention_days ?? 30
@@ -604,6 +605,7 @@ onBeforeUnmount(() => {
           <details class="panel evidence-card"><summary>{{ t('Background jobs', '后台任务') }} · {{ jobs.length }}</summary><div v-for="item in jobs" :key="itemId(item)" class="job-row"><span>{{ item.kind }} · {{ label(item.status) }}</span><button v-if="['queued','running'].includes(item.status)" class="mini" @click="cancelJob(item)">{{ t('Cancel', '取消') }}</button><a v-if="exportArtifact(item)" class="mini" :href="exportArtifact(item).href" :download="exportArtifact(item).name">{{ t('Download', '下载') }}</a></div></details>
         </section>
         <section v-if="activeTab === 'settings'" class="settings-page">
+          <SquadRouting :preferences="advisorPreferences" @saved="advisorPreferences = $event"/>
           <p v-if="errors.settings || errors.status" class="inline-error">{{ errors.settings || errors.status }}</p><p v-if="restoreWarning" class="inline-error">{{ restoreWarning }}</p>
           <article class="panel setting-panel"><h2>{{ t('Collection & learning', '采集与学习') }}</h2><p>{{ t('Pausing collection keeps existing evidence.', '暂停采集不会删除现有证据。') }}</p><button v-for="item in [{key:'recording_enabled',en:'Collect decisions',zh:'采集新决策'},{key:'memory_enabled',en:'Use reviewed case memory',zh:'使用已评估的案例记忆'},{key:'replay_enabled',en:'Retry pending feedback',zh:'重试待送达反馈'}]" :key="item.key" class="switch-row" :disabled="!settings" :aria-pressed="settings?.[item.key]" @click="toggleSetting(item.key, t(item.en,item.zh))"><strong>{{ t(item.en,item.zh) }}</strong><span class="switch" :class="{on:settings?.[item.key]}"><i></i></span></button><p v-if="errors.saveSettings" class="form-error">{{ errors.saveSettings }}</p></article>
           <details class="panel setting-panel"><summary>{{ t('Storage & retention', '存储与保留') }}</summary><p>{{ displayBytes(status?.storage_bytes) }}</p><p v-if="status?.storage_pressure" class="inline-error">{{ t('Storage is above its soft limit. Protected evidence is retained.', '存储超过软上限，受保护证据不会自动删除。') }}</p><label>{{ t('Retention (days)', '保留天数') }}<input v-model="settingsDraft.retention_days" type="number" min="1"/></label><label>{{ t('Storage limit (bytes)', '存储软上限（字节）') }}<input v-model="settingsDraft.soft_limit_bytes" type="number" min="1048576"/></label><button class="button subtle" @click="saveLimits">{{ t('Save', '保存') }}</button></details>

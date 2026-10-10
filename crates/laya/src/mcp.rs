@@ -30,6 +30,11 @@ pub fn tools() -> Value {
         }
     });
     tools["tools"][0]["inputSchema"]["properties"]["advisor"]["properties"]=json!({
+        "role":{"type":"string","enum":["explorer","worker","tester","researcher","reviewer"]},
+        "models":{"type":"array","description":"Host-verified, locally allowed catalog; never infer from dashboard preferences.","items":{"type":"object","required":["id","reasoning_efforts"],"properties":{"id":{"type":"string"},"reasoning_efforts":{"type":"array","items":{"type":"string"}},"tier":{"type":"string","enum":["fast","balanced","strong"]}}}},
+        "current_model":{"type":"string"},
+        "current_reasoning_effort":{"type":"string"},
+        "execution_choice":{"type":"object","required":["model","reasoning_effort"],"additionalProperties":false,"properties":{"model":{"type":"string"},"reasoning_effort":{"type":"string"}}},
         "task_family":{"type":"string","maxLength":64,"pattern":"^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$","description":"Optional reviewed-memory routing scope. Canonicalized to lowercase; docs aliases to documentation. Omit when unknown."},
         "task_lineage":{"type":"string","maxLength":128,"pattern":"^[A-Za-z0-9][A-Za-z0-9_.:/-]*$","description":"Optional independent task/holdout provenance. Same-lineage memory is excluded. Omit when unknown; it is never inferred."}
     });
@@ -200,6 +205,10 @@ mod tests {
         assert!(questions["description"].as_str().unwrap().contains("Example:"));
         assert!(tool["description"].as_str().unwrap().contains("omit questions and provide advisor"));
         let advisor=&tool["inputSchema"]["properties"]["advisor"];
+        assert_eq!(advisor["properties"]["role"]["enum"],json!(["explorer","worker","tester","researcher","reviewer"]));
+        assert_eq!(advisor["properties"]["models"]["type"],"array");
+        assert_eq!(advisor["properties"]["current_model"]["type"],"string");
+        assert_eq!(advisor["properties"]["execution_choice"]["required"],json!(["model","reasoning_effort"]));
         assert_eq!(advisor["properties"]["task_family"]["maxLength"],64);
         assert_eq!(advisor["properties"]["task_lineage"]["maxLength"],128);
         assert!(advisor["description"].as_str().unwrap().contains("language is derived"));

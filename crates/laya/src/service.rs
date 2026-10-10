@@ -401,6 +401,16 @@ async fn api_write(State(app): State<App>, UrlPath(path): UrlPath<String>, heade
     let _shared=if !restoring && pieces.as_slice()!=["feedback"] {Some(app.maintenance.read().await)} else {None};
     if let Some(id) = pieces.get(1) { body["id"] = json!(id); }
     let result = match pieces.as_slice() {
+        ["advisor-preferences"] => {
+            {
+                let _guard = app.privacy.lock().await;
+                app.invalidate_assessments(false).await;
+            }
+            let result=app.worker.call("configure_preferences",body).await;
+            let _guard = app.privacy.lock().await;
+            app.invalidate_assessments(false).await;
+            result
+        }
         ["feedback"] => app.feedback(body).await,
         ["settings"] => {
             let _guard = app.privacy.lock().await;
@@ -693,6 +703,19 @@ mod tests {
         headers.insert("origin","http://127.0.0.1:34567".parse().unwrap());
         assert!(app.authenticated(&headers,true).await.is_ok());
         assert_eq!(app.worker.status()["pid"],0);
+    }
+
+    #[tokio::test]
+    async fn routing_preferences_reject_unpaired_browser_writes() {
+        let dir=tempfile::tempdir().unwrap(); let app=app(dir.path());
+        let before=app.store.call("settings/get",json!({})).await.unwrap();
+        let mut headers=HeaderMap::new();
+        headers.insert("host","127.0.0.1:34567".parse().unwrap());
+        headers.insert("origin","http://127.0.0.1:34567".parse().unwrap());
+        let response=api_write(State(app.clone()),UrlPath("advisor-preferences".into()),headers,Json(json!({"confirmed":true,"policy":"always","ceiling":null,"squad":{"enabled":true,"reviewer":null}}))).await;
+        assert_eq!(response.status(),StatusCode::UNAUTHORIZED);
+        assert_eq!(app.worker.status()["pid"],0);
+        assert_eq!(app.store.call("settings/get",json!({})).await.unwrap(),before);
     }
 
     #[tokio::test]

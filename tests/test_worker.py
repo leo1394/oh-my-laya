@@ -61,6 +61,22 @@ class WorkerTests(unittest.TestCase):
         agent.predict.assert_called_once_with("task", {"test": {"type": "choice", "instructions": "Classify", "criteria": ["low", "high"]}})
         self.assertEqual(errors, "")
 
+    def test_dashboard_preferences_require_confirmation_and_share_advisor_file(self):
+        with TemporaryDirectory() as directory, patch.dict(os.environ, {"LAYA_ADVISOR_CONFIG": str(Path(directory) / "advisor.json")}), patch.object(self.worker.server, "get_agent") as load:
+            params = {"confirmed": True, "policy": "auto", "ceiling": {"model": "host-model", "reasoning_effort": "medium"}, "squad": {"enabled": True, "reviewer": None}}
+            responses, errors = self.run_worker([self.request("save-routing", "configure_preferences", params)])
+            self.assertEqual(errors, "")
+            result = responses[0]["result"]
+            self.assertEqual(result["ceiling"], params["ceiling"])
+            self.assertTrue(self.worker.server.preferences()["squad"]["enabled"])
+            path = Path(directory) / "advisor.json"
+            saved = path.read_bytes()
+            for invalid in [dict(params, confirmed=False), dict(params, policy="invalid"), dict(params, ceiling={"model": "host-model", "reasoning_effort": "ultra"}), dict(params, models=[])]:
+                with self.assertRaises(ValueError):
+                    self.worker._dispatch("configure_preferences", invalid)
+                self.assertEqual(path.read_bytes(), saved)
+            load.assert_not_called()
+
     def test_invalid_question_fields_are_actionable_parameter_errors(self):
         with patch.object(self.worker.server, "get_agent") as load:
             responses, errors = self.run_worker([
