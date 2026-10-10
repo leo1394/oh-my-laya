@@ -1,12 +1,21 @@
-![Oh My Laya — Reflect. Route. Refine.](assets/readme/product-banner.svg)
 # Oh My Laya
+
+**English** | [简体中文](README-ZH.md)
+
+[![CI](https://github.com/leo1394/oh-my-laya/actions/workflows/workbench-release.yml/badge.svg)](https://github.com/leo1394/oh-my-laya/actions/workflows/workbench-release.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+![Oh My Laya — Reflect. Route. Refine.](assets/readme/product-banner.svg)
+
+> One command to bring local Laya decision-making to your coding agents.
 **Native Laya decisions for your AI agents.** Integrate [Laya-MLX](https://github.com/mizorewww/laya-mlx) with Codex, Claude Code, DeepSeek Harness (DSH), and pi-agent: keep simple work with the main agent, route useful subtasks within your model limits, and learn from reviewed feedback. Use it for research, analysis, planning, coding, and other agent tasks.
+
+Oh My Laya builds on [laya-mlx](https://github.com/mizorewww/laya-mlx). It downloads and verifies Hugging Face weights, then registers the `laya_tell_me` tool for classification, scoring, risk routing, and yes/no decisions. Inference runs entirely on your Mac after the model is downloaded.
 
 - **Reflect.** Get structured classifications, scores, and probabilities directly from local inference—not generated text to parse.
 - **Route.** Pair with [Alpha Squad](https://github.com/leo1394/skill-alpha-squad-coding-craft) to select necessary roles and model/reasoning combinations. Your main model stays unchanged.
 - **Refine.** Preserve first scores, inspect uncertain decisions, and review cases before evaluating and activating them for future advice.
 
-[English](README.md) | [简体中文](README-ZH.md)
 
 ## Install
 

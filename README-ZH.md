@@ -1,14 +1,21 @@
-![Oh My Laya — Reflect. Route. Refine.](assets/readme/product-banner.svg)
 # Oh My Laya
+
+[English](README.md) | **简体中文**
+
+[![CI](https://github.com/leo1394/oh-my-laya/actions/workflows/workbench-release.yml/badge.svg)](https://github.com/leo1394/oh-my-laya/actions/workflows/workbench-release.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+![Oh My Laya — Reflect. Route. Refine.](assets/readme/product-banner.svg)
+
 > 一条命令，把本地 Laya 决策能力接入你的编码 Agent。
 **为你的 AI Agent 提供原生 Laya 决策。** 将 [Laya-MLX](https://github.com/mizorewww/laya-mlx) 接入 Codex、Claude Code、DeepSeek Harness（DSH）和 pi-agent：简单任务直接完成，必要子任务在授权内分配模型，再从经过复核的反馈中积累经验。适用于研究、分析、规划、编码等 Agent 任务，不限于软件开发。
+
+Oh My Laya 基于 [laya-mlx](https://github.com/mizorewww/laya-mlx)，自动下载并校验 Hugging Face 权重，随后注册 `laya_tell_me` 工具。它适合做分类、评分、风险分流和是非判断；模型下载完成后，推理完全在本机运行。
 
 - **Reflect · 判断。** 本地推理直接返回分类、评分和概率，不需要生成文本再解析。
 - **Route · 分配。** 配合 [Alpha Squad](https://github.com/leo1394/skill-alpha-squad-coding-craft)，按需选择角色、模型与推理档位，主会话模型保持不变。
 - **Refine · 改进。** 保留首次评分，复核不明确的决策；案例经过评估与明确启用后，才能辅助未来建议。
 
-
-[English](README.md) | [简体中文](README-ZH.md)
 
 ## 一键安装
 

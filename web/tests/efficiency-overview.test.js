@@ -6,7 +6,7 @@ import { createSSRApp } from 'vue'
 import { renderToString } from '@vue/server-renderer'
 
 test('efficiency evidence stays bilingual, scoped, and distinct from token estimates', async () => {
-  const server = await createServer({ root: fileURLToPath(new URL('..', import.meta.url)), server: { middlewareMode: true, ws: false }, appType: 'custom' })
+  const server = await createServer({ root: fileURLToPath(new URL('..', import.meta.url)), configLoader: 'runner', server: { middlewareMode: true, ws: false }, appType: 'custom' })
   try {
     const { default: component } = await server.ssrLoadModule('/src/ImpactOverview.vue')
     const { setLanguage } = await server.ssrLoadModule('/src/i18n.js')
@@ -21,7 +21,7 @@ test('efficiency evidence stays bilingual, scoped, and distinct from token estim
     setLanguage('en')
     const english = await render(evidence)
     assert.match(english, /recorded attempts/)
-    assert.match(english, /<b>2<\/b> reported runs in this date range · not complete task coverage/)
+    assert.match(english, /<b[^>]*>2<\/b> reported runs in this date range · not complete task coverage/)
     assert.match(english, /repair attempts/)
     assert.match(english, /upgrade attempts/)
     assert.match(english, /Usable usage evidence: 2 \/ 5/)
@@ -35,7 +35,7 @@ test('efficiency evidence stays bilingual, scoped, and distinct from token estim
     setLanguage('zh')
     const chinese = await render(evidence)
     assert.match(chinese, /次修复尝试/)
-    assert.match(chinese, /<b>2<\/b> 个当前时间范围内已上报运行 · 不代表完整任务覆盖/)
+    assert.match(chinese, /<b[^>]*>2<\/b> 个当前时间范围内已上报运行 · 不代表完整任务覆盖/)
     assert.match(chinese, /案例学习/)
     assert.match(chinese, /有首次评分/)
     assert.match(chinese, /可用用量证据: 2 \/ 5/)

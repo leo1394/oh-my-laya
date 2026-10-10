@@ -42,7 +42,7 @@ test('workbench renders the shared default range on overview without a service r
     const html = await renderToString(createSSRApp(component))
     assert.match(html, /Decision date/)
     assert.match(html, /Last 7 days/)
-    assert.match(html, /aria-pressed="true"[^>]*>Last 7 days/)
+    assert.match(html, /<option value="today" selected>Today/)
     assert.doesNotMatch(html, /type="datetime-local"/)
   } finally {
     await server.close()

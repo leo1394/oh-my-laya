@@ -173,7 +173,7 @@ class ServiceFailureTests(unittest.TestCase):
                 os.kill(orphan, signal.SIGTERM)
                 orphan = None
                 time.sleep(0.1)
-                self.assertIn("laya_result", second.rpc("predict", {"state": "after orphan exit", "questions": {"risk": {}}}))
+                self.assertIn("answers", second.rpc("predict", {"state": "after orphan exit", "questions": {"risk": {}}}))
             finally:
                 channel.close()
                 if orphan is not None:

@@ -15,6 +15,7 @@ if [ "$(uname -s)" != Darwin ] || [ "$(uname -m)" != arm64 ]; then
 fi
 
 cd "$project_dir/web"
+python3 "$project_dir/tools/version.py"
 npm ci
 npm run build
 test -f dist/index.html

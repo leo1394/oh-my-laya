@@ -14,6 +14,8 @@ for line in sys.stdin:
             assert "memory_cases" not in request["params"], "typed decisions must not receive advisor memory"
         if request["params"]["state"] == "fixture:slow":
             time.sleep(30)
+        if request["params"]["state"] == "fixture:activity-slow":
+            time.sleep(2)
         if request["params"]["state"] == "fixture:crash":
             sys.exit(2)
         answers = {key: {"choice": value, "confidence": 0.9} for key, value in

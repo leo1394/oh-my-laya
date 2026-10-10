@@ -9,10 +9,14 @@ from pathlib import Path
 from urllib import request
 
 
-WORKBENCH_VERSION = "0.2.0"
-# Public release bytes independently verified on 2026-10-05.
+WORKBENCH_VERSION = "2.0.1"
+# Release artifact bytes are verified before publication and pinned here.
 # Never replace an existing asset; publish a new tag when its bytes change.
 TRUSTED_RELEASES = {
+    "2.0.1": {
+        "url": "https://github.com/leo1394/oh-my-laya/releases/download/v2.0.1/laya-macos-arm64",
+        "sha256": "ae65a3c61473c121271282eaf904dbaf7b8d52cd507d79e3cc26c885a4b3558f",
+    },
     "0.2.0": {
         "url": "https://github.com/leo1394/oh-my-laya/releases/download/v0.2.0-rc.3/laya-macos-arm64",
         "sha256": "15316d19599fb2df80436a4250bd0a516dadca0454f5a196f8beb532b4486854",

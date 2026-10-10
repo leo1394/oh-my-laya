@@ -195,11 +195,11 @@ async fn schema_four_migrates_with_event_hash_and_pre_migration_backup_preserved
     }
     let path=root.path().join("laya.sqlite3");
     let connection=Connection::open(&path).unwrap();
-    connection.execute_batch("DROP INDEX IF EXISTS feedback_attempt_sequence_idx; DROP INDEX IF EXISTS feedback_usage_stream_idx; DROP INDEX IF EXISTS feedback_execution_scope_idx; PRAGMA user_version=4; UPDATE settings SET value_json=json_set(value_json,'$.schema_version',4);").unwrap();
+    connection.execute_batch("DROP INDEX IF EXISTS feedback_attempt_sequence_idx; DROP INDEX IF EXISTS feedback_usage_stream_idx; DROP INDEX IF EXISTS feedback_execution_scope_idx; DROP INDEX IF EXISTS decisions_activity_recent_idx; ALTER TABLE decisions DROP COLUMN created_at_ms; PRAGMA user_version=4; UPDATE settings SET schema_version=4;").unwrap();
     drop(connection);
 
     let store=Store::open(root.path()).unwrap();
-    assert_eq!(store.call("status",json!({})).await.unwrap()["schema_version"],5);
+    assert_eq!(store.call("status",json!({})).await.unwrap()["schema_version"],6);
     let detail=store.call("decisions/get",json!({"id":"legacy"})).await.unwrap();
     assert_eq!(detail["feedback"][0]["payload_hash"],expected_hash);
     let indexes=Connection::open(&path).unwrap().query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN('feedback_attempt_sequence_idx','feedback_usage_stream_idx','feedback_execution_scope_idx')",[],|row|row.get::<_,u64>(0)).unwrap();
@@ -231,7 +231,7 @@ async fn schema_four_migrates_with_event_hash_and_pre_migration_backup_preserved
 
     begin(&store,"after-migration").await;
     assert_eq!(store.call("backup/restore",json!({"id":id})).await.unwrap()["id"],id);
-    assert_eq!(store.call("status",json!({})).await.unwrap()["schema_version"],5);
+    assert_eq!(store.call("status",json!({})).await.unwrap()["schema_version"],6);
     let restored=store.call("decisions/get",json!({"id":"legacy"})).await.unwrap();
     assert_eq!(restored["feedback"][0]["payload_hash"],expected_hash);
     assert!(store.call("decisions/get",json!({"id":"after-migration"})).await.unwrap_err().to_string().starts_with("not_found:"));
@@ -248,7 +248,7 @@ async fn schema_four_migrates_with_event_hash_and_pre_migration_backup_preserved
 async fn fresh_database_does_not_create_a_pre_migration_backup() {
     let root=tempfile::tempdir().unwrap();
     let store=Store::open(root.path()).unwrap();
-    assert_eq!(store.call("status",json!({})).await.unwrap()["schema_version"],5);
+    assert_eq!(store.call("status",json!({})).await.unwrap()["schema_version"],6);
     assert!(store.call("backup/list",json!({})).await.unwrap()["items"].as_array().unwrap().is_empty());
     assert_eq!(fs::read_dir(root.path().join("backups")).unwrap().count(),0);
     let events=store.call("events",json!({"after":0,"limit":1000})).await.unwrap();

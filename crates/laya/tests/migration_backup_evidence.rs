@@ -46,8 +46,10 @@ async fn automatic_migration_backup_restores_external_evidence_without_reviving_
         "DROP INDEX IF EXISTS feedback_attempt_sequence_idx;
          DROP INDEX IF EXISTS feedback_usage_stream_idx;
          DROP INDEX IF EXISTS feedback_execution_scope_idx;
+         DROP INDEX IF EXISTS decisions_activity_recent_idx;
+         ALTER TABLE decisions DROP COLUMN created_at_ms;
          PRAGMA user_version=4;
-         UPDATE settings SET value_json=json_set(value_json,'$.schema_version',4);"
+         UPDATE settings SET schema_version=4;"
     ).unwrap();
     let store=Store::open(root.path()).unwrap();
     let listed=store.call("backup/list",json!({})).await.unwrap();
@@ -66,7 +68,7 @@ async fn automatic_migration_backup_restores_external_evidence_without_reviving_
     fs::remove_file(&request_path).unwrap();
     fs::write(&output_path,b"damaged external output").unwrap();
     assert_eq!(store.call("backup/restore",json!({"id":backup_id})).await.unwrap()["restored"],true);
-    assert_eq!(store.call("status",json!({})).await.unwrap()["schema_version"],5);
+    assert_eq!(store.call("status",json!({})).await.unwrap()["schema_version"],6);
     let detail=store.call("decisions/get",json!({"id":"external"})).await.unwrap();
     assert_eq!(detail["request"],request);
     assert_eq!(detail["result"],output);

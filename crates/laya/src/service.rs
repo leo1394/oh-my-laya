@@ -154,6 +154,8 @@ impl App {
             Err(error) if ["conflict:","deleted:","invalid:"].iter().any(|prefix|error.to_string().starts_with(prefix))=>return Err(error),
             Err(error)=>json!({"recording_status":"not_saved","recording_error":error.to_string(),"existing":false}),
         };
+        // Publish the pending record before inference, not only after it finishes.
+        if begin["recording_status"]=="stored" && begin["existing"]!=true {self.changed.notify_waiters();}
         if begin["existing"] == true {
             if let Some(result) = begin.get("result").filter(|v| !v.is_null()) { return Ok(result.clone()); }
             bail!("interrupted: existing request has no confirmed result; use a new attempt id");
@@ -313,7 +315,9 @@ async fn api_get(State(app): State<App>, UrlPath(path): UrlPath<String>, Query(q
     if let ["exports",id]=pieces.as_slice() {
         return match download_export(&app,id).await {Ok(response)=>response,Err(error)=>failure(error)};
     }
-    let params = if pieces.as_slice()==["decisions"] {
+    let params = if pieces.as_slice()==["activity"] {
+        match activity_params(&query) {Ok(params)=>params,Err(error)=>return failure(error)}
+    } else if pieces.as_slice()==["decisions"] {
         match decisions_list_params(&query) {Ok(params)=>params,Err(error)=>return failure(error)}
     } else if pieces.as_slice()==["overview"] {
         match time_filter_params(&query,false) {Ok(params)=>params,Err(error)=>return failure(error)}
@@ -321,6 +325,15 @@ async fn api_get(State(app): State<App>, UrlPath(path): UrlPath<String>, Query(q
         match time_filter_params(&query,true) {Ok(params)=>params,Err(error)=>return failure(error)}
     } else if let Some(id)=pieces.get(1) {json!({"id":id})} else {json!({"limit":query.get("limit").and_then(|s|s.parse::<u64>().ok()).unwrap_or(50),"offset":query.get("offset").and_then(|s|s.parse::<u64>().ok()).unwrap_or(0)})};
     let result = match pieces.as_slice() {
+        ["activity"] => match app.store.call("activity",params).await {
+            Ok(mut value)=> {
+                value["worker"]=app.worker.status();
+                value["observed_at"]=json!(now());
+                value["service_instance"]=json!(app.info.instance);
+                Ok(value)
+            },
+            Err(error)=>Err(error),
+        },
         ["status"] => app.status().await,
         ["overview"] => app.store.call("overview/get",params).await,
         ["settings"] => app.store.call("settings/get",json!({})).await,
@@ -340,6 +353,18 @@ async fn api_get(State(app): State<App>, UrlPath(path): UrlPath<String>, Query(q
         _ => Err(anyhow::anyhow!("not_found: endpoint")),
     };
     match result { Ok(value)=>Json(value).into_response(), Err(error)=>failure(error) }
+}
+
+fn activity_params(query:&HashMap<String,String>)->Result<Value> {
+    if let Some(key)=query.keys().find(|key|!["created_after","created_before","limit","offset","q"].contains(&key.as_str())) {bail!("invalid: unknown activity query {key}");}
+    let mut params=serde_json::Map::new();
+    for key in ["created_after","created_before","limit","offset"] {
+        if let Some(value)=query.get(key) {
+            params.insert(key.into(),json!(value.parse::<i64>().map_err(|_|anyhow::anyhow!("invalid: {key} must be an integer"))?));
+        }
+    }
+    if let Some(value)=query.get("q") {params.insert("q".into(),json!(value));}
+    Ok(Value::Object(params))
 }
 
 fn decisions_list_params(query:&HashMap<String,String>)->Result<Value> {
@@ -639,6 +664,34 @@ pub async fn run_with_port(root:PathBuf,port:u16)->Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activity_query_rejects_unknown_and_noninteger_fields() {
+        assert_eq!(activity_params(&HashMap::from([("created_after".into(),"10".into()),("created_before".into(),"20".into())])).unwrap(),json!({"created_after":10,"created_before":20}));
+        assert!(activity_params(&HashMap::from([("created_after".into(),"today".into())])).is_err());
+        assert_eq!(activity_params(&HashMap::from([("offset".into(),"10".into()),("q".into(),"案例".into())])).unwrap(),json!({"offset":10,"q":"案例"}));
+        assert!(activity_params(&HashMap::from([("offset".into(),"invalid".into())])).is_err());
+        assert!(activity_params(&HashMap::from([("unknown".into(),"0".into())])).is_err());
+    }
+
+    #[tokio::test]
+    async fn activity_is_authenticated_and_pending_decisions_notify_before_finish() {
+        let dir=tempfile::tempdir().unwrap(); let mut app=app(dir.path());
+        let fixture=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/workbench_worker.py");
+        app.worker=Worker::start(fixture.to_string_lossy().into_owned(),Duration::ZERO,dir.path().join("model.lock"));
+        let mut headers=HeaderMap::new(); headers.insert("host","127.0.0.1:34567".parse().unwrap());
+        assert_eq!(api_get(State(app.clone()),UrlPath("activity".into()),Query(HashMap::new()),headers).await.status(),StatusCode::UNAUTHORIZED);
+        app.store.call("settings/update",json!({"recording_enabled":true})).await.unwrap();
+        let notified=app.changed.notified(); tokio::pin!(notified); notified.as_mut().enable();
+        let request=Request::new("predict",json!({"state":"fixture:activity-slow","questions":{"risk":{"type":"choice","instructions":"Risk?","criteria":["low","high"]}}}));
+        let id=request.request_id.clone(); let task_app=app.clone();
+        let task=tokio::spawn(async move {task_app.predict(&request).await});
+        tokio::time::timeout(Duration::from_secs(1),notified).await.expect("pending decision must wake SSE before inference finishes");
+        let pending=app.store.call("decisions/get",json!({"id":id})).await.unwrap();
+        assert!(pending["finished_at"].is_null());
+        task.await.unwrap().unwrap();
+        app.worker.call("release",json!({})).await.unwrap();
+    }
 
     #[test]
     fn historical_applicability_exclusions_are_not_injected_into_worker() {

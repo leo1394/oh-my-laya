@@ -5,6 +5,7 @@ pub mod outbox;
 pub mod runtime;
 pub mod mcp;
 pub mod store;
+pub(crate) mod activity;
 pub mod service;
 pub mod assets;
 pub mod evaluation;

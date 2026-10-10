@@ -30,6 +30,7 @@ struct Candidate {
 }
 
 pub fn summarize(manifests:Vec<ManifestRecord>,usages:Vec<UsageRecord>)->Value {
+    let manifests=latest_lifecycle_snapshots(manifests,&usages);
     let raw_collisions=raw_manifest_collisions(&manifests);
     let mut excluded=0u64;
     let mut candidates=Vec::new();
@@ -131,6 +132,36 @@ pub fn summarize(manifests:Vec<ManifestRecord>,usages:Vec<UsageRecord>)->Value {
         "excluded_components":["local_laya_inference"],
         "runs":runs
     })
+}
+
+fn latest_lifecycle_snapshots(manifests:Vec<ManifestRecord>,usages:&[UsageRecord])->Vec<ManifestRecord> {
+    let by_event=usages.iter().map(|usage|(usage.event_id.as_str(),usage)).collect::<HashMap<_,_>>();
+    let sequences=|record:&ManifestRecord|->Option<HashMap<(String,String),(String,u64)>> {
+        let p=&record.payload;
+        if !p["scenario"]["input_source"].as_str()?.contains("; lifecycle-snapshot-v1;")||!p["run_id"].as_str()?.starts_with("codex-lifecycle:"){return None;}
+        let mut values=HashMap::new();
+        for segment in p["segments"].as_array()? {
+            let usage=*by_event.get(segment["usage_event_id"].as_str()?)?;
+            if !eligible(usage)||usage.decision_id!=segment["decision_id"].as_str()?||usage.attempt_ref!=segment["attempt_ref"].as_str()?{return None;}
+            let key=(usage.decision_id.clone(),usage.attempt_ref.clone());
+            if values.insert(key,(usage.payload["usage_stream_id"].as_str()?.to_string(),usage.payload["source_sequence"].as_u64()?)).is_some(){return None;}
+        }
+        (!values.is_empty()).then_some(values)
+    };
+    let versions=manifests.iter().map(sequences).collect::<Vec<_>>();
+    let mut superseded=HashSet::new();
+    for (i,old) in manifests.iter().enumerate() {
+        let Some(old_versions)=&versions[i] else{continue;};
+        for (j,new) in manifests.iter().enumerate() {
+            if i==j||old.payload["run_id"]!=new.payload["run_id"]||old.payload["host_root_ref"]!=new.payload["host_root_ref"]{continue;}
+            if ["orchestrator_model","reasoning_effort","input_source"].iter().any(|key|old.payload["scenario"][*key]!=new.payload["scenario"][*key]){continue;}
+            let Some(new_versions)=&versions[j] else{continue;};
+            let covers=old_versions.iter().all(|(key,(stream,seq))|new_versions.get(key).is_some_and(|(next_stream,next_seq)|stream==next_stream&&next_seq>=seq));
+            let grows=new_versions.len()>old_versions.len()||old_versions.iter().any(|(key,(_,seq))|new_versions.get(key).is_some_and(|(_,next_seq)|next_seq>seq));
+            if covers&&grows {superseded.insert(i);break;}
+        }
+    }
+    manifests.into_iter().enumerate().filter_map(|(i,m)|(!superseded.contains(&i)).then_some(m)).collect()
 }
 
 fn candidate(record:ManifestRecord)->Option<Candidate> {
@@ -299,6 +330,25 @@ mod tests {
             payload["source_sequence"]=json!(sequence);
         }
         UsageRecord {event_id:event.to_string(),decision_id:decision.to_string(),attempt_ref:attempt.to_string(),payload}
+    }
+
+    #[test]
+    fn lifecycle_snapshots_follow_native_sequence_not_delivery_order() {
+        let mut old=manifest("m1","codex-lifecycle:r","h","d","a","u1","partial",true);
+        old.payload["scenario"]["input_source"]=json!("native-envelope-v1; lifecycle-snapshot-v1; test");
+        let mut new=old.clone();
+        new.event_id="m2".into();
+        new.payload["segments"][0]["usage_event_id"]=json!("u2");
+        let reports=vec![usage("u1","d","a",json!(100),Some(1)),usage("u2","d","a",json!(495),Some(2))];
+        let result=summarize(vec![new.clone(),old.clone()],reports.clone());
+        assert_eq!(result["actual_total"],495);
+        assert_eq!(result["saved"]["central"],0);
+        assert_eq!(result["included_runs"],1);
+        assert_eq!(result["excluded_runs"],0);
+        let mut conflict=new.clone();
+        conflict.event_id="conflict".into();
+        conflict.payload["scenario"]["initial_context_tokens"]=json!(999);
+        assert_eq!(summarize(vec![new,old,conflict],reports)["status"],"unavailable");
     }
 
     #[test]

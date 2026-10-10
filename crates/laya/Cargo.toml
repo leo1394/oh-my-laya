@@ -1,6 +1,6 @@
 [package]
 name = "laya"
-version = "0.2.0"
+version = "2.0.1"
 edition = "2021"
 
 [dependencies]

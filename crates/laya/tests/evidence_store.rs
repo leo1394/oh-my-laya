@@ -305,7 +305,7 @@ async fn schema_one_database_migrates_and_reopens_with_evidence() {
     let store=Store::open(root.path()).unwrap();
     store.call("settings/update",json!({"recording_enabled":true})).await.unwrap();
     store.call("decisions/begin",json!({"request_id":"r","id":"d","request":{"state":large("migrated-")}})).await.unwrap();
-    assert_eq!(store.call("status",json!({})).await.unwrap()["schema_version"],5);
+    assert_eq!(store.call("status",json!({})).await.unwrap()["schema_version"],6);
     drop(store);
     let reopened=Store::open(root.path()).unwrap();
     assert!(reopened.call("decisions/get",json!({"id":"d"})).await.unwrap()["request"]["state"].as_str().unwrap().starts_with("migrated-"));
@@ -355,7 +355,7 @@ async fn schema_one_backup_is_migrated_during_restore() {
     Connection::open(root.path().join("laya.sqlite3")).unwrap().execute("INSERT INTO backups(id,relative_path,sha256,schema_version,created_at) VALUES('legacy','backups/legacy.sqlite3',?1,1,1)",[digest]).unwrap();
     store.call("backup/restore",json!({"id":"legacy"})).await.unwrap();
     assert_eq!(store.call("decisions/get",json!({"id":"legacy"})).await.unwrap()["request"]["state"],"legacy backup");
-    assert_eq!(store.call("status",json!({})).await.unwrap()["schema_version"],5);
+    assert_eq!(store.call("status",json!({})).await.unwrap()["schema_version"],6);
 }
 
 #[tokio::test]

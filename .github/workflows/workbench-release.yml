@@ -14,6 +14,8 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -25,6 +27,12 @@ jobs:
           python-version: '3.12'
       - name: Install Python runtime and test dependencies
         run: python -m pip install .
+      - name: Verify release version
+        run: |
+          python tools/version.py
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            python tools/version.py --tag "$GITHUB_REF_NAME"
+          fi
       - name: Build embedded web assets and release binary
         run: tools/package-workbench-release.sh
       - name: Verify Rust persistence and frontend contracts before packaging
@@ -33,7 +41,9 @@ jobs:
           npm --prefix web test
           cargo build --locked
           PYTHONPATH=src python -m unittest discover -s tests
+          python -m unittest discover -s skills/alpha-squad-coding-craft/tests
           LAYA_TEST_BINARY="$PWD/dist/workbench/laya-macos-arm64" python tests/smoke_workbench.py
+          LAYA_TEST_BINARY="$PWD/dist/workbench/laya-macos-arm64" python tests/smoke_activity.py
       - uses: actions/upload-artifact@v4
         with:
           name: laya-macos-arm64
@@ -53,6 +63,22 @@ jobs:
             echo "error: refusing to modify published release ${GITHUB_REF_NAME}" >&2
             exit 1
           fi
+          if gh release view "${GITHUB_REF_NAME}" --json assets --jq '.assets[].name' | grep -Fx laya-macos-arm64 >/dev/null; then
+            verification_dir=$(mktemp -d)
+            gh release download "${GITHUB_REF_NAME}" --pattern 'laya-macos-arm64*' --dir "$verification_dir"
+            (cd "$verification_dir" && shasum -a 256 -c laya-macos-arm64.sha256)
+            PYTHONPATH=src python - "$verification_dir/laya-macos-arm64" <<'PY'
+          import sys
+          from pathlib import Path
+          from laya_tell_me.runtime_install import WORKBENCH_VERSION, TRUSTED_RELEASES, _sha256, _validate_binary
+          artifact = Path(sys.argv[1])
+          assert _sha256(artifact) == TRUSTED_RELEASES[WORKBENCH_VERSION]['sha256']
+          _validate_binary(artifact)
+          PY
+            LAYA_TEST_BINARY="$verification_dir/laya-macos-arm64" python tests/smoke_workbench.py
+            LAYA_TEST_BINARY="$verification_dir/laya-macos-arm64" python tests/smoke_activity.py
+            exit 0
+          fi
           for asset in laya-macos-arm64 laya-macos-arm64.sha256; do
             if gh release view "${GITHUB_REF_NAME}" --json assets \
                 --jq ".assets[].name" | grep -Fx "$asset" >/dev/null; then
@@ -60,6 +86,11 @@ jobs:
               exit 1
             fi
           done
+          PYTHONPATH=src python - <<'PY'
+          from pathlib import Path
+          from laya_tell_me.runtime_install import WORKBENCH_VERSION, TRUSTED_RELEASES, _sha256
+          assert _sha256(Path('dist/workbench/laya-macos-arm64')) == TRUSTED_RELEASES[WORKBENCH_VERSION]['sha256'], 'Release bytes must match the installer pin before upload'
+          PY
           gh release upload "${GITHUB_REF_NAME}" \
             dist/workbench/laya-macos-arm64 \
             dist/workbench/laya-macos-arm64.sha256

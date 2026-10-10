@@ -174,7 +174,7 @@ class SchemaFiveRollbackTests(unittest.TestCase):
 
             current = OwnedService(CURRENT_BINARY, root, OLD_WORKER)
             try:
-                self.assertEqual(current.rpc("status")["schema_version"], 5)
+                self.assertEqual(current.rpc("status")["schema_version"], 6)
                 http = current.authenticated_http()
                 detail = http(f"decisions/{decision_id}")
                 recorded = next(item for item in detail["feedback"] if item["event_id"] == event_id)
@@ -193,7 +193,7 @@ class SchemaFiveRollbackTests(unittest.TestCase):
             )
             migrated_state = database_state(database, event_id)
             self.assertEqual(migrated_state, {
-                "schema": 5,
+                "schema": 6,
                 "integrity": "ok",
                 "event_hash": expected_hash,
             })
@@ -212,7 +212,7 @@ class SchemaFiveRollbackTests(unittest.TestCase):
                 capture_output=True, text=True, timeout=10,
             )
             self.assertNotEqual(rejected.returncode, 0, rejected.stdout)
-            self.assertIn("database schema 5 is newer than supported 4", rejected.stderr)
+            self.assertIn("database schema 6 is newer than supported 4", rejected.stderr)
             after_rejection_bytes = database.read_bytes()
             after_rejection = hashlib.sha256(after_rejection_bytes).hexdigest()
             self.assertEqual(database_state(database, event_id), migrated_state)
@@ -222,7 +222,7 @@ class SchemaFiveRollbackTests(unittest.TestCase):
             pages = sorted({page for start, end in ranges for page in range(start // page_size + 1, end // page_size + 2)})
             wal = root / "laya.sqlite3-wal"
             print(
-                "rc3 schema5 rejection preserved all logical schema/rows; "
+                "rc3 schema6 rejection preserved all logical schema/rows; "
                 f"physical_sha_changed={before_rejection != after_rejection} "
                 f"changed_ranges={ranges} pages={pages} "
                 f"wal_bytes={wal.stat().st_size if wal.exists() else 0}"

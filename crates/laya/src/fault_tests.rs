@@ -13,7 +13,7 @@ fn run_child(root:&Path,point:&str,scenario:&str)->Output {
     let mut command=Command::new(std::env::current_exe().unwrap());
     command.args(["--ignored","--exact","fault_tests::child","--nocapture"])
         .env("LAYA_TEST_FAULT_ROOT",root).env("LAYA_TEST_FAULT_POINT",point).env("LAYA_TEST_SCENARIO",scenario).env("LAYA_TEST_FAULT_MODE","kill").env("RUST_BACKTRACE","0");
-    if scenario=="io_failure" {command.env("LAYA_TEST_FAULT_MODE",if point=="evidence.before_write"{"enospc"}else{"eio"});}
+    if scenario=="io_failure"||scenario=="restore_io_failure" {command.env("LAYA_TEST_FAULT_MODE",if point=="evidence.before_write"{"enospc"}else{"eio"});}
     command.output().unwrap()
 }
 
@@ -154,6 +154,16 @@ fn kill_after_restore_install_recovers_backup_state_without_resurrection() {
 }
 
 #[test]
+fn returned_restore_failure_refreshes_privacy_revision() {
+    let root=tempfile::tempdir().unwrap();
+    let runtime=tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(prepare_restore(root.path()));
+    let output=run_child(root.path(),"restore.after_install","restore_io_failure");
+    assert_reached(root.path(),&output);
+    assert!(output.status.success(),"child failed; stdout={}\nstderr={}",String::from_utf8_lossy(&output.stdout),String::from_utf8_lossy(&output.stderr));
+}
+
+#[test]
 fn injected_evidence_io_errors_roll_back_and_retry_cleanly() {
     for point in ["evidence.before_write","evidence.before_sync"] {
         let root=tempfile::tempdir().unwrap();
@@ -180,6 +190,17 @@ fn child() {
         match scenario.as_str() {
             "begin"=>{let _=store.call("decisions/begin",json!({"request_id":"fault","id":"fault","request":{"state":large()}})).await;}
             "restore"=>{let _=store.call("backup/restore",json!({"id":"known"})).await;}
+            "restore_io_failure"=>{
+                let range=json!({"created_after":0,"created_before":900});
+                let before=store.call("activity",range.clone()).await.unwrap()["privacy_revision"].clone();
+                let error=store.call("backup/restore",json!({"id":"known"})).await.unwrap_err();
+                let actual=error.chain().find_map(|cause|cause.downcast_ref::<std::io::Error>().and_then(std::io::Error::raw_os_error));
+                assert_eq!(actual,Some(libc::EIO));
+                let after=store.call("activity",range).await.unwrap()["privacy_revision"].clone();
+                assert_ne!(after,before);
+                let connection=Connection::open(root.join("laya.sqlite3")).unwrap();
+                assert_eq!(after,crate::activity::privacy_revision(&connection).unwrap());
+            }
             "io_failure"=>{
                 let request=json!({"request_id":"fault","id":"fault","request":{"state":large()}});
                 let error=store.call("decisions/begin",request.clone()).await.unwrap_err();

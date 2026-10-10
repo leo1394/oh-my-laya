@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "oh-my-laya"
-version = "0.2.0"
+version = "2.0.1"
 description = "Install local Laya-MLX and connect it to coding agents"
 readme = "README.md"
 requires-python = ">=3.11"

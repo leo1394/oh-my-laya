@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 
 import { api, eventsUrl, jsonBody } from './api.js'
 import { locale, setLanguage, t, label } from './i18n.js'
@@ -10,6 +10,7 @@ import ImpactOverview from './ImpactOverview.vue'
 import ExecutionEvidence from './ExecutionEvidence.vue'
 import DateRangePicker from './DateRangePicker.vue'
 import SquadRouting from './SquadRouting.vue'
+import LiveActivity from './LiveActivity.vue'
 import {
   dateRangeBounds,
   decisionQuery,
@@ -59,9 +60,10 @@ async function saveTiers() {
 
 
 const activeTab = ref('queue')
+const liveActivity = ref(null)
 const status = ref(null)
 const overview = ref(null)
-const dateRange = ref(presetDateRange('last7'))
+const dateRange = ref(presetDateRange('today'))
 const dateBounds = computed(() => dateRangeBounds(dateRange.value))
 const decisions = ref([])
 const selectedDecision = ref(null)
@@ -83,6 +85,8 @@ const errors = reactive({})
 const notice = ref('')
 const pairing = ref(false)
 const eventState = ref('connecting')
+const activityVersion = ref(0)
+const activityReset = ref(0)
 const settingsDraft = reactive({ retention_days: 30, soft_limit_bytes: 524288000 })
 const review = reactive({
   status: 'confirmed',
@@ -177,15 +181,13 @@ function loadOverview() {
   return loadRanged('overview', `/overview?${rangeQuery(dateBounds.value)}`, () => request === overviewRequest, (payload) => { overview.value = payload })
 }
 
-function focusPriorityCases() {
+async function focusPriorityCases() {
+  activeTab.value = 'cases'
   queueFilters.status = 'pending'
   queueFilters.risk = ''
   queueFilters.source = ''
-  if (rebasePresetRange()) {
-    document.querySelector('.queue-panel')?.scrollIntoView({ block: 'start' })
-    return
-  }
-  applyQueueFilters()
+  if (!rebasePresetRange()) await applyQueueFilters()
+  await nextTick()
   document.querySelector('.queue-panel')?.scrollIntoView({ block: 'start' })
 }
 
@@ -260,6 +262,7 @@ async function loadSettings() {
 }
 
 async function loadAll() {
+  activityVersion.value += 1
   const rebased = rebasePresetRange()
   await Promise.all([loadStatus(), rebased ? Promise.resolve() : loadOverview(), rebased ? Promise.resolve() : loadDecisions(), rebased ? Promise.resolve() : loadCases(), loadSettings()])
 }
@@ -319,7 +322,7 @@ async function deleteDecision() {
     method: 'DELETE'
   }, t("Decision deleted.", "决策已删除。"), async () => {
     selectedDecision.value = null
-    activeTab.value = 'queue'
+    activeTab.value = 'cases'
     await Promise.all([loadDecisions(), loadStatus(), loadOverview()])
   })
 }
@@ -466,6 +469,8 @@ function connectEvents() {
       refreshTimer = null
       const changes = [...pendingChanges].join(' ')
       pendingChanges.clear()
+      if (/stream\.reset|delet|retention|restore/.test(changes)) activityReset.value += 1
+      activityVersion.value += 1
       if (changes.includes('stream.reset')) {
         loadAll()
         return
@@ -487,8 +492,7 @@ watch(activeTab, (tab) => {
   const rebased = rebasePresetRange()
   if (tab === 'settings') loadSettings()
   if (rebased) return
-  if (tab === 'queue') loadDecisions()
-  if (tab === 'cases') loadCases()
+  if (tab === 'cases') { loadDecisions(); loadCases() }
 })
 
 watch(dateRange, () => {
@@ -530,48 +534,33 @@ onBeforeUnmount(() => {
   <div class="app-shell">
     <aside class="rail">
       <div class="brand"><img class="brand-mark" src="/logo.svg" alt="" width="42" height="42"/><div><strong>Oh My Laya</strong><span>{{ t('Decision workbench', '决策工作台') }}</span></div></div>
-      <nav :aria-label="t('Navigation', '导航')"><button v-for="tab in tabs" :key="tab.id" class="nav-item" :class="{ active: activeTab === tab.id || (activeTab === 'detail' && tab.id === 'queue') }" @click="activeTab = tab.id"><span>{{ tab.number }}</span>{{ tab.label }}</button></nav>
+      <nav :aria-label="t('Navigation', '导航')"><button v-for="tab in tabs" :key="tab.id" class="nav-item" :class="{ active: activeTab === tab.id || (activeTab === 'detail' && tab.id === 'cases') }" @click="activeTab = tab.id"><span>{{ tab.number }}</span>{{ tab.label }}</button></nav>
       <div class="rail-status"><span class="signal" :class="{ ok: serviceHealthy }"></span><div><strong>{{ serviceHealthy ? t('Service ready', '服务就绪') : t('Service unavailable', '服务不可用') }}</strong><span>{{ label(eventState) }}</span></div></div>
       <p class="rail-note">{{ t('Your decisions. Kept on this device.', '决策与反馈，保留在本机。') }}</p>
     </aside>
     <main>
-      <header class="topbar"><div><p class="eyebrow brand-tagline">Oh My Laya — Reflect. Route. Refine.</p><h1>{{ activeTab === 'detail' ? t('Review case', '复核案例') : tabs.find(tab => tab.id === activeTab)?.label }}</h1></div><div class="top-actions"><select :value="locale" @change="setLanguage($event.target.value)" aria-label="Language / 语言"><option value="en">English</option><option value="zh">简体中文</option></select><button class="icon-button" :aria-label="t('Refresh', '刷新')" @click="loadAll">↻</button></div></header>
+      <header class="topbar"><div><p class="eyebrow brand-tagline">Oh My Laya — Reflect. Route. Refine.</p><h1>{{ activeTab === 'detail' ? t('Review case', '复核案例') : tabs.find(tab => tab.id === activeTab)?.label }}</h1></div><div class="top-actions"><select :value="locale" @change="setLanguage($event.target.value)" aria-label="Language / 语言"><option value="en">English</option><option value="zh">简体中文</option></select><button v-if="activeTab !== 'queue'" class="icon-button" :aria-label="t('Refresh', '刷新')" @click="loadAll">↻</button></div></header>
       <div v-if="errors.pairing" class="inline-error">{{ t('Unable to pair with the service.', '无法连接本地服务。') }} {{ errors.pairing }}</div>
       <div v-else-if="pairing" class="page-state">{{ t('Connecting…', '连接中…') }}</div>
       <template v-else>
         <div v-for="[key, message] in Object.entries(errors).filter(([key, message]) => message && !['pairing','status','overview','dateRange','settings','decisions','detail','review','tiers','createVersion','cases','versions','saveSettings'].includes(key))" :key="key" class="inline-error" role="alert">{{ message }}</div>
         <section v-if="activeTab === 'queue'" class="page-grid queue-page">
-          <DateRangePicker v-model="dateRange"/>
+          <div class="overview-toolbar"><span class="overview-label">{{ t('Activity & usage', '活动与用量') }}</span><div class="overview-controls"><button class="button subtle" :disabled="!liveActivity" @click="liveActivity?.togglePause()">{{ liveActivity?.paused ? t('Resume display', '继续显示') : t('Pause display', '暂停显示') }}</button><button class="button subtle" @click="loadAll"><span aria-hidden="true">↻</span> {{ t('Refresh', '刷新') }}</button><DateRangePicker v-model="dateRange" compact/></div></div>
           <div v-if="errors.dateRange" class="inline-error" role="alert">{{ errors.dateRange }}</div>
-          <div v-if="loading.overview" class="page-state">{{ t('Loading selected date range…', '正在加载所选日期范围…') }}</div>
-          <ImpactOverview v-else :status="overview" @review="focusPriorityCases" @cases="activeTab = 'cases'" />
-          <div v-if="errors.status || errors.overview" class="inline-error">{{ errors.status || errors.overview }}</div>
+          <section class="overview-metrics panel" :aria-label="t('Usage summary', '用量概览')">
+            <div v-if="loading.overview" class="page-state">{{ t('Loading selected date range…', '正在加载所选日期范围…') }}</div>
+            <ImpactOverview v-else :status="overview" view="tokens" hero @usage-range="dateRange = presetDateRange('last7')" />
           <div class="summary-strip">
             <article><span>{{ t('Decisions collected', '已采集决策') }}</span><strong>{{ overview?.counts?.decisions ?? '—' }}</strong></article>
-            <article><span>{{ t('Needs your review', '待你复核') }}</span><strong>{{ overview?.counts?.pending_reviews ?? '—' }}</strong></article>
+            <article><button class="summary-link" @click="focusPriorityCases"><span>{{ t('Needs your review', '待复核决策') }}</span><strong>{{ overview?.counts?.pending_reviews ?? '—' }}</strong></button></article>
             <article><span>{{ t('Squad feedback', 'Squad 反馈') }}</span><strong>{{ overview?.counts?.feedback ?? '—' }}</strong></article>
           </div>
-          <div class="risk-summary"><span>{{ t('Recorded risk', '已记录风险') }}</span><span v-for="tier in [...tiers, 'unknown']" :key="tier">{{ label(tier) }} <b>{{ overview?.risk_counts?.[tier] ?? '—' }}</b></span><small>{{ t('Not a model ranking or a success rate.', '不代表模型强弱或成功率。') }}</small></div>
-          <article class="panel tier-panel">
-            <div class="panel-head"><div><h2>{{ t('Three model combinations', '三档模型搭配') }}</h2><p>{{ t('Suggestions stay within your existing authorization ceiling.', 'Laya 在已有授权上限内建议，不扩大权限。') }}</p></div><button v-if="!editingTiers" class="button subtle" :disabled="!settings" @click="editTiers">{{ t('Configure', '配置') }}</button></div>
-            <p v-if="advisorPreferences?.policy === 'auto'" class="muted">{{ t('Automatic ceiling', '自动建议上限') }}: {{ advisorPreferences.ceiling ? advisorPreferences.ceiling.model + ' / ' + advisorPreferences.ceiling.reasoning_effort : t('Not configured; confirmation required', '未配置，需先确认') }}</p>
-            <form v-if="editingTiers" @submit.prevent="saveTiers">
-              <div class="tier-grid"><div v-for="tier in tiers" :key="tier" class="tier-card"><strong>{{ label(tier) }}</strong><label>{{ t('Model', '模型') }}<input v-model="tierDraft[tier].model" :aria-label="label(tier) + ' / ' + t('Model', '模型')" maxlength="128" :placeholder="t('Exact model ID', '模型完整名称')"/></label><label>{{ t('Reasoning', '推理档位') }}<input v-model="tierDraft[tier].reasoning_effort" :aria-label="label(tier) + ' / ' + t('Reasoning', '推理档位')" maxlength="32" placeholder="low / medium / high"/></label></div></div>
-              <p class="muted">{{ t('The host verifies availability at call time. An unsupported or over-ceiling combination cannot be used automatically. Clear both fields to leave a tier unconfigured.', '实际调用时由宿主校验。不可用或超出上限的组合不会自动采用；同时清空两项可取消配置。') }}</p>
-              <p v-if="errors.tiers" class="form-error">{{ errors.tiers }}</p><div class="form-actions"><button type="button" class="button subtle" @click="editingTiers = false">{{ t('Cancel', '取消') }}</button><button class="button primary" :disabled="loading.tiers">{{ t('Save combinations', '保存搭配') }}</button></div>
-            </form>
-            <div v-else class="tier-grid"><div v-for="tier in tiers" :key="tier" class="tier-card"><strong>{{ label(tier) }}</strong><span>{{ tierSummary(tier) }}</span></div></div>
-          </article>
-          <article class="panel queue-panel">
-            <div class="panel-head"><div><h2>{{ t('Cases to review', '需要关注的案例') }}</h2><p>{{ t('Uncertainty and problem feedback come first.', '优先关注不确定判断与问题反馈。') }}</p></div><select v-model="queueFilters.status" @change="applyQueueFilters" :aria-label="t('Case filter', '案例筛选')"><option value="pending">{{ t('Needs review', '待复核') }}</option><option value="all">{{ t('All decisions', '全部决策') }}</option><option value="finished">{{ t('Finished', '已完成') }}</option></select></div>
-            <details class="disclosure"><summary>{{ t('More filters', '更多筛选') }}</summary><form class="filter queue-filters" @submit.prevent="applyQueueFilters"><label>{{ t('Risk', '风险') }}<select v-model="queueFilters.risk"><option value="">{{ t('All', '全部') }}</option><option v-for="tier in tiers" :key="tier" :value="tier">{{ label(tier) }}</option></select></label><label>{{ t('Host or role', '宿主或角色') }}<input v-model="queueFilters.source"/></label><button class="button subtle">{{ t('Apply', '应用') }}</button></form></details>
-            <div v-if="loading.decisions" class="page-state">{{ t('Loading…', '加载中…') }}</div><div v-else-if="errors.decisions" class="inline-error">{{ errors.decisions }} <button @click="loadDecisions">{{ t('Retry', '重试') }}</button></div><div v-else-if="!decisions.length" class="empty-state"><span class="empty-glyph">✓</span><h3>{{ t('Nothing here yet', '暂无案例') }}</h3><p>{{ t('Collected decisions and Squad feedback appear here.', '采集到的决策与 Squad 反馈会显示在这里。') }}</p></div>
-            <div v-else class="decision-list"><button v-for="decision in decisions" :key="itemId(decision)" class="decision-row" @click="openDecision(decision)"><span class="priority-mark" :class="'tier-' + (decision.review_priority || 0)"></span><span class="decision-copy"><strong>{{ decisionTitle(decision) }}</strong><small>{{ displayTime(decision.created_at) }}</small><ReviewSignals :decision="decision"/></span><span class="row-arrow">→</span></button></div>
-            <div class="queue-pagination"><button class="button subtle" :disabled="loading.decisions || queueOffset === 0" @click="changeQueuePage(-1)">{{ t('Previous', '上一页') }}</button><span>{{ queueOffset / 50 + 1 }}</span><button class="button subtle" :disabled="loading.decisions || decisions.length < 50" @click="changeQueuePage(1)">{{ t('Next', '下一页') }}</button></div>
-          </article>
+          </section>
+          <LiveActivity ref="liveActivity" embedded :range="dateBounds" :event-version="activityVersion" :reset-version="activityReset" :event-state="eventState" @clock="rebasePresetRange" @open="id => openDecision({ id })"/>
+          <div v-if="errors.status || errors.overview" class="inline-error">{{ errors.status || errors.overview }}</div>
         </section>
         <section v-if="activeTab === 'detail'" class="detail-page">
-          <button class="text-button" @click="activeTab = 'queue'">← {{ t('Overview', '返回概览') }}</button>
+          <button class="text-button" @click="activeTab = 'cases'">← {{ t('Case study', '返回案例学习') }}</button>
           <p v-if="loading.detail">{{ t('Loading…', '加载中…') }}</p><p v-else-if="errors.detail" class="inline-error">{{ errors.detail }}</p>
           <template v-else-if="selectedDecision">
             <div class="detail-title"><h2>{{ decisionTitle(selectedDecision) }}</h2><ReviewSignals :decision="selectedDecision"/></div>
@@ -597,6 +586,16 @@ onBeforeUnmount(() => {
         <section v-if="activeTab === 'cases'" class="cases-page">
           <DateRangePicker v-model="dateRange"/>
           <p v-if="errors.dateRange" class="inline-error" role="alert">{{ errors.dateRange }}</p>
+          <ImpactOverview :status="overview" view="learning" @review="focusPriorityCases" />
+          <div v-if="errors.overview" class="inline-error">{{ errors.overview }}</div>
+          <div class="risk-summary"><span>{{ t('Recorded risk', '已记录风险') }}</span><span v-for="tier in [...tiers, 'unknown']" :key="tier">{{ label(tier) }} <b>{{ overview?.risk_counts?.[tier] ?? '—' }}</b></span><small>{{ t('Not a model ranking or a success rate.', '不代表模型强弱或成功率。') }}</small></div>
+          <article class="panel queue-panel">
+            <div class="panel-head"><div><h2>{{ t('Cases to review', '需要关注的案例') }}</h2><p>{{ t('Uncertainty and problem feedback come first.', '优先关注不确定判断与问题反馈。') }}</p></div><select v-model="queueFilters.status" @change="applyQueueFilters" :aria-label="t('Case filter', '案例筛选')"><option value="pending">{{ t('Needs review', '待复核') }}</option><option value="all">{{ t('All decisions', '全部决策') }}</option><option value="finished">{{ t('Finished', '已完成') }}</option></select></div>
+            <details class="disclosure"><summary>{{ t('More filters', '更多筛选') }}</summary><form class="filter queue-filters" @submit.prevent="applyQueueFilters"><label>{{ t('Risk', '风险') }}<select v-model="queueFilters.risk"><option value="">{{ t('All', '全部') }}</option><option v-for="tier in tiers" :key="tier" :value="tier">{{ label(tier) }}</option></select></label><label>{{ t('Host or role', '宿主或角色') }}<input v-model="queueFilters.source"/></label><button class="button subtle">{{ t('Apply', '应用') }}</button></form></details>
+            <div v-if="loading.decisions" class="page-state">{{ t('Loading…', '加载中…') }}</div><div v-else-if="errors.decisions" class="inline-error">{{ errors.decisions }} <button @click="loadDecisions">{{ t('Retry', '重试') }}</button></div><div v-else-if="!decisions.length" class="empty-state"><span class="empty-glyph">✓</span><h3>{{ t('Nothing here yet', '暂无案例') }}</h3><p>{{ t('Collected decisions and Squad feedback appear here.', '采集到的决策与 Squad 反馈会显示在这里。') }}</p></div>
+            <div v-else class="decision-list"><button v-for="decision in decisions" :key="itemId(decision)" class="decision-row" @click="openDecision(decision)"><span class="priority-mark" :class="'tier-' + (decision.review_priority || 0)"></span><span class="decision-copy"><strong>{{ decisionTitle(decision) }}</strong><small>{{ displayTime(decision.created_at) }}</small><ReviewSignals :decision="decision"/></span><span class="row-arrow">→</span></button></div>
+            <div class="queue-pagination"><button class="button subtle" :disabled="loading.decisions || queueOffset === 0" @click="changeQueuePage(-1)">{{ t('Previous', '上一页') }}</button><span>{{ queueOffset / 50 + 1 }}</span><button class="button subtle" :disabled="loading.decisions || decisions.length < 50" @click="changeQueuePage(1)">{{ t('Next', '下一页') }}</button></div>
+          </article>
           <p>{{ t('Reviewed cases are kept here. Changes do not train the model or activate memory automatically.', '复核后的案例保存在这里；不会自动训练模型或启用记忆。') }}</p>
           <p>{{ t('The case list follows decision dates; memory and version management remains all time.', '案例列表按决策时间筛选；记忆与版本管理仍显示全部时间。') }}</p>
           <p v-if="errors.cases || errors.versions" class="inline-error">{{ errors.cases || errors.versions }}</p>
@@ -605,6 +604,16 @@ onBeforeUnmount(() => {
           <details class="panel evidence-card"><summary>{{ t('Background jobs', '后台任务') }} · {{ jobs.length }}</summary><div v-for="item in jobs" :key="itemId(item)" class="job-row"><span>{{ item.kind }} · {{ label(item.status) }}</span><button v-if="['queued','running'].includes(item.status)" class="mini" @click="cancelJob(item)">{{ t('Cancel', '取消') }}</button><a v-if="exportArtifact(item)" class="mini" :href="exportArtifact(item).href" :download="exportArtifact(item).name">{{ t('Download', '下载') }}</a></div></details>
         </section>
         <section v-if="activeTab === 'settings'" class="settings-page">
+          <article class="panel tier-panel">
+            <div class="panel-head"><div><h2>{{ t('Three model combinations', '三档模型搭配') }}</h2><p>{{ t('Suggestions stay within your existing authorization ceiling.', 'Laya 在已有授权上限内建议，不扩大权限。') }}</p></div><button v-if="!editingTiers" class="button subtle" :disabled="!settings" @click="editTiers">{{ t('Configure', '配置') }}</button></div>
+            <p v-if="advisorPreferences?.policy === 'auto'" class="muted">{{ t('Automatic ceiling', '自动建议上限') }}: {{ advisorPreferences.ceiling ? advisorPreferences.ceiling.model + ' / ' + advisorPreferences.ceiling.reasoning_effort : t('Not configured; confirmation required', '未配置，需先确认') }}</p>
+            <form v-if="editingTiers" @submit.prevent="saveTiers">
+              <div class="tier-grid"><div v-for="tier in tiers" :key="tier" class="tier-card"><strong>{{ label(tier) }}</strong><label>{{ t('Model', '模型') }}<input v-model="tierDraft[tier].model" :aria-label="label(tier) + ' / ' + t('Model', '模型')" maxlength="128" :placeholder="t('Exact model ID', '模型完整名称')"/></label><label>{{ t('Reasoning', '推理档位') }}<input v-model="tierDraft[tier].reasoning_effort" :aria-label="label(tier) + ' / ' + t('Reasoning', '推理档位')" maxlength="32" placeholder="low / medium / high"/></label></div></div>
+              <p class="muted">{{ t('The host verifies availability at call time. An unsupported or over-ceiling combination cannot be used automatically. Clear both fields to leave a tier unconfigured.', '实际调用时由宿主校验。不可用或超出上限的组合不会自动采用；同时清空两项可取消配置。') }}</p>
+              <p v-if="errors.tiers" class="form-error">{{ errors.tiers }}</p><div class="form-actions"><button type="button" class="button subtle" @click="editingTiers = false">{{ t('Cancel', '取消') }}</button><button class="button primary" :disabled="loading.tiers">{{ t('Save combinations', '保存搭配') }}</button></div>
+            </form>
+            <div v-else class="tier-grid"><div v-for="tier in tiers" :key="tier" class="tier-card"><strong>{{ label(tier) }}</strong><span>{{ tierSummary(tier) }}</span></div></div>
+          </article>
           <SquadRouting :preferences="advisorPreferences" @saved="advisorPreferences = $event"/>
           <p v-if="errors.settings || errors.status" class="inline-error">{{ errors.settings || errors.status }}</p><p v-if="restoreWarning" class="inline-error">{{ restoreWarning }}</p>
           <article class="panel setting-panel"><h2>{{ t('Collection & learning', '采集与学习') }}</h2><p>{{ t('Pausing collection keeps existing evidence.', '暂停采集不会删除现有证据。') }}</p><button v-for="item in [{key:'recording_enabled',en:'Collect decisions',zh:'采集新决策'},{key:'memory_enabled',en:'Use reviewed case memory',zh:'使用已评估的案例记忆'},{key:'replay_enabled',en:'Retry pending feedback',zh:'重试待送达反馈'}]" :key="item.key" class="switch-row" :disabled="!settings" :aria-pressed="settings?.[item.key]" @click="toggleSetting(item.key, t(item.en,item.zh))"><strong>{{ t(item.en,item.zh) }}</strong><span class="switch" :class="{on:settings?.[item.key]}"><i></i></span></button><p v-if="errors.saveSettings" class="form-error">{{ errors.saveSettings }}</p></article>

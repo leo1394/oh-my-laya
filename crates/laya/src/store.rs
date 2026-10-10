@@ -4,7 +4,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use std::{collections::{HashMap, HashSet, VecDeque}, fs, io::Read, path::{Path, PathBuf}, sync::mpsc, thread, time::Duration};
+use std::{collections::{HashMap, HashSet, VecDeque}, fs, io::Read, path::{Path, PathBuf}, sync::mpsc, thread, time::{Duration, SystemTime, UNIX_EPOCH}};
 use tokio::sync::oneshot;
 
 const MIGRATION_1: &str = include_str!("../../../migrations/0001_workbench.sql");
@@ -12,8 +12,9 @@ const MIGRATION_2: &str = include_str!("../../../migrations/0002_evidence.sql");
 const MIGRATION_3: &str = include_str!("../../../migrations/0003_case_applicability.sql");
 const MIGRATION_4: &str = include_str!("../../../migrations/0004_case_lineage.sql");
 const MIGRATION_5: &str = include_str!("../../../migrations/0005_efficiency_indexes.sql");
+const MIGRATION_6: &str = include_str!("../../../migrations/0006_decision_milliseconds.sql");
 const MAX_FEEDBACK_BYTES: usize = 16 * 1024;
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 pub const EVALUATOR_IDENTITY: &str = "laya-advisor-evaluator-v3";
 pub const BUDGET_EVALUATOR_IDENTITY: &str = "laya-advisor-evaluator-v4";
 pub const MEMORY_INPUT_POLICY: &str = "whole-case-token-budget-v1";
@@ -41,6 +42,7 @@ struct Database {
     unrecorded: HashSet<String>,
     unrecorded_order: VecDeque<String>,
     evidence_cleanup_error: Option<String>,
+    privacy_revision: String,
 }
 
 impl Store {
@@ -108,7 +110,8 @@ impl Database {
         }
         connection.execute("UPDATE settings SET value_json=json_set(value_json,'$.replay_enabled',json('true')) WHERE json_type(value_json,'$.replay_enabled') IS NULL",[])?;
         connection.execute("UPDATE jobs SET status='interrupted', updated_at=?1 WHERE status IN('running','queued')", [now()])?;
-        let mut database=Self { connection, root, unrecorded: HashSet::new(), unrecorded_order: VecDeque::new(), evidence_cleanup_error:None };
+        let privacy_revision=crate::activity::privacy_revision(&connection)?;
+        let mut database=Self { connection, root, unrecorded: HashSet::new(), unrecorded_order: VecDeque::new(), evidence_cleanup_error:None, privacy_revision };
         if let Err(error)=database.cleanup_evidence(true) {database.evidence_cleanup_error=Some(error.to_string());}
         Ok(database)
     }
@@ -120,6 +123,7 @@ impl Database {
             "decisions/begin" => self.decisions_begin(value),
             "decisions/finish" => self.decisions_finish(value),
             "decisions/list" => self.decisions_list(value),
+            "activity" => crate::activity::query_with_revision(&self.connection, value, &self.privacy_revision),
             "decisions/get" => self.decisions_get(value),
             "decisions/is_deleted" | "is_deleted" => self.decisions_is_deleted(value),
             "decisions/delete" => self.decisions_delete(value),
@@ -147,6 +151,13 @@ impl Database {
             "status" => self.status(),
             _ => bail!("not_found: unknown store method {method}"),
         };
+        if matches!(method,"decisions/delete"|"cases/delete"|"retention"|"backup/restore") {
+            match crate::activity::privacy_revision(&self.connection) {
+                Ok(revision)=>self.privacy_revision=revision,
+                Err(error) if result.is_ok()=>return Err(error),
+                Err(_)=>{},
+            }
+        }
         if matches!(method,"decisions/begin"|"decisions/finish"|"decisions/delete"|"cases/delete"|"retention"|"backup/restore") {
             let cleanup=self.cleanup_evidence(result.is_err() || !matches!(method,"decisions/begin"|"decisions/finish") || self.evidence_cleanup_error.is_some());
             self.evidence_cleanup_error=cleanup.as_ref().err().map(ToString::to_string);
@@ -229,10 +240,12 @@ impl Database {
             if existing_id != id || existing_request != request.to_string() { bail!("conflict: request_id {request_id} was already used with different content"); }
             return Ok(json!({"id":id,"status":"begun","request_id":request_id,"recording_status":"stored","existing":true,"result":result.map(|text|parse_json(&text)).transpose()?}));
         }
-        let timestamp = now();
+        let instant = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+        let timestamp = instant.as_secs() as i64;
+        let timestamp_ms = instant.as_millis() as i64;
         let transaction = self.connection.transaction()?;
-        transaction.execute("INSERT INTO decisions(id,request_id,request_json,recording_status,created_at) VALUES(?1,?2,?3,'stored',?4)",
-            params![id, request_id, request.to_string(), timestamp]).map_err(conflict)?;
+        transaction.execute("INSERT INTO decisions(id,request_id,request_json,recording_status,created_at,created_at_ms) VALUES(?1,?2,?3,'stored',?4,?5)",
+            params![id, request_id, request.to_string(), timestamp, timestamp_ms]).map_err(conflict)?;
         insert_snapshot(&self.root, &transaction, id, request_id, None, "request", &request, changed, false, timestamp)?;
         emit_tx(&transaction, "decision.created", &json!({"id":id}))?;
         transaction.commit()?;
@@ -314,7 +327,7 @@ impl Database {
     fn decisions_get(&self, value: Value) -> Result<Value> {
         let id = id_param(&value)?;
         let decision = self.connection.query_row(
-            "SELECT id,request_id,request_json,result_json,error_json,context_json,recording_status,protected,created_at,finished_at FROM decisions WHERE id=?1 AND deleted_at IS NULL", [id], decision_row).optional()?
+            "SELECT id,request_id,request_json,result_json,error_json,context_json,recording_status,protected,created_at,finished_at,created_at_ms FROM decisions WHERE id=?1 AND deleted_at IS NULL", [id], decision_row).optional()?
             .ok_or_else(|| anyhow!("not_found: decision {id}"))?;
         let feedback = json_column(&self.connection, "SELECT json_object('event_id',event_id,'kind',kind,'attempt_ref',attempt_ref,'source',json(source_json),'payload',json(payload_json),'payload_hash',event_hash,'receive_sequence',receive_sequence,'received_at',received_at) FROM feedback_events WHERE decision_id=?1 ORDER BY receive_sequence", id)?;
         let reviews = json_column(&self.connection, "SELECT json_object('revision',r.revision,'status',r.status,'labels',json(r.labels_json),'reason',r.reason,'actor',json(r.actor_json),'created_at',r.created_at,'task_family',c.task_family,'task_lineage',c.task_lineage,'language',c.language,'applicability',c.applicability,'applicability_reason',c.applicability_reason,'validation_assignment_event_id',c.validation_assignment_event_id,'validation_context',json(c.validation_context_json),'verification_status',c.verification_status,'last_validated_at',c.last_validated_at) FROM reviews r LEFT JOIN cases c ON c.decision_id=r.decision_id AND c.review_revision=r.revision WHERE r.decision_id=?1 ORDER BY r.revision", id)?;
@@ -892,6 +905,37 @@ impl Database {
     }
 
     fn dashboard_summary(&self, created_after:Option<i64>, created_before:Option<i64>) -> Result<Value> {
+        let local_inference={
+            let mut statement=self.connection.prepare("SELECT result_json,error_json,finished_at FROM decisions WHERE deleted_at IS NULL AND (?1 IS NULL OR created_at>=?1) AND (?2 IS NULL OR created_at<=?2)")?;
+            let rows=statement.query_map(params![created_after,created_before],|row|Ok((row.get::<_,Option<String>>(0)?,row.get::<_,Option<String>>(1)?,row.get::<_,Option<i64>>(2)?)))?;
+            let (mut input,mut output,mut known,mut missing,mut cached)=(0u64,0u64,0u64,0u64,0u64);
+            let mut overflow=false;
+            for row in rows {
+                let (result,error,finished)=row?;
+                let result=result.and_then(|text|serde_json::from_str::<Value>(&text).ok());
+                let success=finished.is_some()&&error.as_deref().is_none_or(|text|text=="null");
+                let Some(result)=result.filter(|result|success&&result.is_object()) else {missing+=1;continue;};
+                if result.pointer("/meta/assessment_cache/status").and_then(Value::as_str)==Some("hit")
+                    || result.pointer("/meta/assessment_cache/raw_usage_scope").and_then(Value::as_str)==Some("source_evaluation")
+                    || result.pointer("/meta/memory_receipt/usage_scope").and_then(Value::as_str)==Some("source_evaluation") {
+                    cached+=1;
+                    continue;
+                }
+                let usage=result.get("laya_result").unwrap_or(&result).get("usage");
+                let counts=usage.and_then(|usage|Some((usage.get("input_tokens")?.as_u64()?,usage.get("output_tokens")?.as_u64()?)));
+                let Some((input_tokens,output_tokens))=counts else {missing+=1;continue;};
+                known+=1;
+                if !overflow {
+                    match input.checked_add(input_tokens).zip(output.checked_add(output_tokens)) {
+                        Some((next_input,next_output)) if next_input.checked_add(next_output).is_some_and(|sum|sum<=9_007_199_254_740_991)=>{input=next_input;output=next_output;}
+                        _=>overflow=true,
+                    }
+                }
+            }
+            let available=known+cached>0&&!overflow;
+            let status=if overflow{"overflow"}else if !available{"unavailable"}else if missing>0{"partial"}else{"available"};
+            json!({"total_tokens":if available{Some(input+output)}else{None},"input_tokens":if available{Some(input)}else{None},"output_tokens":if available{Some(output)}else{None},"known_decisions":known,"missing_decisions":missing,"cached_decisions":cached,"status":status,"scope":"stored_decisions_fresh_local_inference"})
+        };
         let mut statement=self.connection.prepare("SELECT f.decision_id,f.attempt_ref,f.payload_json,d.created_at FROM feedback_events f JOIN decisions d ON d.id=f.decision_id WHERE f.kind='usage' AND d.deleted_at IS NULL ORDER BY f.receive_sequence")?;
         let rows=statement.query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,i64>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
         let mut reports:HashMap<(String,String),Vec<Value>>=HashMap::new();
@@ -950,7 +994,7 @@ impl Database {
         let estimated_saved=scenario["saved"]["central"].clone();
         let baseline_status=if scenario["status"]=="unavailable"{"collecting_inputs"}else{"scenario_estimate"};
         let efficiency=crate::efficiency::summary(&self.connection,&reused_streams,created_after,created_before)?;
-        Ok(json!({"tokens":{"recorded_total":if included>0&&!overflow {Some(total)} else {None},"included_attempts":included,"excluded_reports":excluded,"aggregation_status":aggregation_status,"exclusion_reasons":exclusion_reasons,"scope":"verified_non_overlapping_attempt_streams","estimated_saved":estimated_saved,"baseline_status":baseline_status,"scenario":scenario},"learning":{"uncertain_pending":uncertain,"problem_pending":problem,"uncertain_with_problem_pending":both,"reviewer_corrections_pending":corrections,"reviewed_cases":reviewed,"evaluated_versions":evaluated},"execution_models":distribution,"efficiency":efficiency,"time_scope":{"default":"decision.created_at","evaluated_versions":"memory_versions.created_at","created_after":created_after,"created_before":created_before}}))
+        Ok(json!({"tokens":{"local_inference":local_inference,"recorded_total":if included>0&&!overflow {Some(total)} else {None},"included_attempts":included,"excluded_reports":excluded,"aggregation_status":aggregation_status,"exclusion_reasons":exclusion_reasons,"scope":"verified_non_overlapping_attempt_streams","estimated_saved":estimated_saved,"baseline_status":baseline_status,"scenario":scenario},"learning":{"uncertain_pending":uncertain,"problem_pending":problem,"uncertain_with_problem_pending":both,"reviewer_corrections_pending":corrections,"reviewed_cases":reviewed,"evaluated_versions":evaluated},"execution_models":distribution,"efficiency":efficiency,"time_scope":{"default":"decision.created_at","evaluated_versions":"memory_versions.created_at","created_after":created_after,"created_before":created_before}}))
     }
 
     fn overview(&self,value:Value)->Result<Value> {
@@ -1333,6 +1377,7 @@ fn migrate_with_backup(connection:&Connection,backup:Option<&(String,String)>)->
     if version<3 {transaction.execute_batch(MIGRATION_3)?;}
     if version<4 {transaction.execute_batch(MIGRATION_4)?;}
     if version<5 {transaction.execute_batch(MIGRATION_5)?;}
+    if version<6 {transaction.execute_batch(MIGRATION_6)?;}
     if let Some((id,digest))=backup {
         transaction.execute("INSERT INTO backups(id,relative_path,sha256,schema_version,created_at) VALUES(?1,?2,?3,?4,?5)",params![id,format!("backups/{id}.sqlite3"),digest,version,now()])?;
         emit_tx(&transaction,"backup.created",&json!({"id":id,"reason":"pre_migration"}))?;
@@ -1623,7 +1668,7 @@ fn emit_tx(transaction: &Transaction<'_>, kind: &str, payload: &Value) -> Result
 }
 
 fn decision_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
-    Ok(json!({"id":row.get::<_,String>(0)?,"request_id":row.get::<_,String>(1)?,"request":parse_sql_json(row.get::<_,String>(2)?)?,"result":optional_sql_json(row.get::<_,Option<String>>(3)?)?,"error":optional_sql_json(row.get::<_,Option<String>>(4)?)?,"context":optional_sql_json(row.get::<_,Option<String>>(5)?)?,"recording_status":row.get::<_,String>(6)?,"protected":row.get::<_,bool>(7)?,"created_at":row.get::<_,i64>(8)?,"finished_at":row.get::<_,Option<i64>>(9)?}))
+    Ok(json!({"id":row.get::<_,String>(0)?,"request_id":row.get::<_,String>(1)?,"request":parse_sql_json(row.get::<_,String>(2)?)?,"result":optional_sql_json(row.get::<_,Option<String>>(3)?)?,"error":optional_sql_json(row.get::<_,Option<String>>(4)?)?,"context":optional_sql_json(row.get::<_,Option<String>>(5)?)?,"recording_status":row.get::<_,String>(6)?,"protected":row.get::<_,bool>(7)?,"created_at":row.get::<_,i64>(8)?,"finished_at":row.get::<_,Option<i64>>(9)?,"created_at_ms":row.get::<_,Option<i64>>(10)?}))
 }
 
 pub(crate) fn review_queue_cte()->&'static str {r#"WITH decision_signals AS (
@@ -1653,10 +1698,10 @@ FROM decision_signals
 
 fn review_queue_columns()->&'static str {"id,request_id,request_json,result_json,error_json,context_json,recording_status,protected,created_at,finished_at,risk,reported_high_risk,uncertain,invalid_result,decision_error,problem_score,test_failed,outcome_failed,review_disagreement,user_changed,model_upgrade,reported_label_change,review_priority,review_trigger_count,trigger_event_ids,review_sources"}
 
-fn review_queue_list_columns()->&'static str {"id,request_id,CASE WHEN json_type(request_json,'$.state')='text' THEN substr(json_extract(request_json,'$.state'),1,280) ELSE id END,latest_review_status,recording_status,protected,created_at,finished_at,risk,reported_high_risk,uncertain,invalid_result,decision_error,problem_score,test_failed,outcome_failed,review_disagreement,user_changed,model_upgrade,reported_label_change,review_priority,review_trigger_count,trigger_event_ids,review_sources"}
+fn review_queue_list_columns()->&'static str {"id,request_id,CASE WHEN json_type(request_json,'$.state')='text' THEN substr(json_extract(request_json,'$.state'),1,280) ELSE id END,latest_review_status,recording_status,protected,created_at,finished_at,risk,reported_high_risk,uncertain,invalid_result,decision_error,problem_score,test_failed,outcome_failed,review_disagreement,user_changed,model_upgrade,reported_label_change,review_priority,review_trigger_count,trigger_event_ids,review_sources,created_at_ms"}
 
 fn review_queue_list_row(row:&rusqlite::Row<'_>)->rusqlite::Result<Value>{
-    let mut decision=json!({"id":row.get::<_,String>(0)?,"request_id":row.get::<_,String>(1)?,"summary":row.get::<_,Option<String>>(2)?,"status":row.get::<_,String>(3)?,"recording_status":row.get::<_,String>(4)?,"protected":row.get::<_,bool>(5)?,"created_at":row.get::<_,i64>(6)?,"finished_at":row.get::<_,Option<i64>>(7)?});
+    let mut decision=json!({"id":row.get::<_,String>(0)?,"request_id":row.get::<_,String>(1)?,"summary":row.get::<_,Option<String>>(2)?,"status":row.get::<_,String>(3)?,"recording_status":row.get::<_,String>(4)?,"protected":row.get::<_,bool>(5)?,"created_at":row.get::<_,i64>(6)?,"finished_at":row.get::<_,Option<i64>>(7)?,"created_at_ms":row.get::<_,Option<i64>>(24)?});
     apply_review_queue_fields_at(row,&mut decision,8)?;
     Ok(decision)
 }
@@ -2385,7 +2430,16 @@ mod tests {
             connection.execute("UPDATE settings SET active_memory_version='legacy-active' WHERE singleton=1",[]).unwrap();
         }
         let store=Store::open(root.path()).unwrap();
-        assert_eq!(store.call("status",json!({})).await.unwrap()["schema_version"],5);
+        assert_eq!(store.call("status",json!({})).await.unwrap()["schema_version"],6);
+        let old=store.call("decisions/get",json!({"id":"task"})).await.unwrap();
+        assert_eq!(old["created_at"],1);
+        assert_eq!(old["created_at_ms"],Value::Null);
+        store.call("settings/update",json!({"recording_enabled":true})).await.unwrap();
+        store.call("decisions/begin",json!({"request_id":"new","id":"new","request":{}})).await.unwrap();
+        let new=store.call("decisions/get",json!({"id":"new"})).await.unwrap();
+        assert_eq!(new["created_at_ms"].as_i64().unwrap()/1000,new["created_at"].as_i64().unwrap());
+        let listed=store.call("decisions/list",json!({})).await.unwrap();
+        assert_eq!(listed["items"][0]["created_at_ms"],new["created_at_ms"]);
         let cases=store.call("cases/list",json!({})).await.unwrap();
         let task=cases["items"].as_array().unwrap().iter().find(|case|case["id"]=="task:1").unwrap();
         let config=cases["items"].as_array().unwrap().iter().find(|case|case["id"]=="config:1").unwrap();
@@ -2404,15 +2458,32 @@ mod tests {
         assert!(root.path().join("backups").read_dir().unwrap().next().is_some());
     }
 
+    #[test]
+    fn schema_five_migration_preserves_unknown_milliseconds() {
+        let connection=Connection::open_in_memory().unwrap();
+        for migration in [MIGRATION_1,MIGRATION_2,MIGRATION_3,MIGRATION_4,MIGRATION_5] {connection.execute_batch(migration).unwrap();}
+        connection.pragma_update(None,"user_version",5).unwrap();
+        connection.execute("INSERT INTO decisions(id,request_id,request_json,recording_status,created_at) VALUES('legacy','legacy','{}','stored',123)",[]).unwrap();
+        migrate(&connection).unwrap();
+        let (created_at,created_at_ms):(i64,Option<i64>)=connection.query_row("SELECT created_at,created_at_ms FROM decisions WHERE id='legacy'",[],|row|Ok((row.get(0)?,row.get(1)?))).unwrap();
+        assert_eq!(created_at,123);
+        assert_eq!(created_at_ms,None);
+        assert_eq!(connection.query_row("PRAGMA user_version",[],|row|row.get::<_,i64>(0)).unwrap(),6);
+    }
+
     #[tokio::test]
     async fn backup_restore_uses_verified_snapshot_and_safety_backup() {
         let (_root,store)=recorded_store().await;
         store.call("decisions/begin",json!({"request_id":"r1","id":"d1","request":{}})).await.unwrap();
+        let before=store.call("decisions/get",json!({"id":"d1"})).await.unwrap()["created_at_ms"].clone();
         store.call("backup/create",json!({"id":"known"})).await.unwrap();
         store.call("decisions/delete",json!({"id":"d1"})).await.unwrap();
         store.call("decisions/begin",json!({"request_id":"r2","id":"d2","request":{}})).await.unwrap();
         let restored=store.call("backup/restore",json!({"id":"known"})).await.unwrap();
         assert_eq!(restored["restored"],true);
+        let connection=Connection::open(_root.path().join("laya.sqlite3")).unwrap();
+        let archived:Option<i64>=connection.query_row("SELECT created_at_ms FROM decisions WHERE id='d1'",[],|row|row.get(0)).unwrap();
+        assert_eq!(archived,Some(before.as_i64().unwrap()));
         assert!(store.call("decisions/get",json!({"id":"d1"})).await.unwrap_err().to_string().starts_with("not_found:"));
         assert_eq!(store.call("is_deleted",json!({"id":"d1"})).await.unwrap()["deleted"],true);
         assert!(store.call("decisions/get",json!({"id":"d2"})).await.unwrap_err().to_string().starts_with("not_found:"));

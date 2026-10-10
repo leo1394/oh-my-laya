@@ -16,6 +16,7 @@ class ReleasePackagingTests(unittest.TestCase):
             root = Path(directory)
             (root / "tools").mkdir()
             shutil.copy2(ROOT / "tools/package-workbench-release.sh", root / "tools/package.sh")
+            (root / "tools/version.py").write_text("print('2.0.1')\n")
             (root / "web/dist").mkdir(parents=True)
             (root / "web/dist/index.html").write_text("fixture")
             stale = root / "target/release/laya"

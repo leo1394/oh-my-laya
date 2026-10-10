@@ -50,7 +50,7 @@ class RuntimeInstallTests(unittest.TestCase):
                 subprocess.run([str(stdio)], check=True, capture_output=True, text=True).stdout.splitlines()[0],
                 "mcp",
             )
-            self.assertTrue(binary.parent.name.startswith("workbench-0.2.0-"))
+            self.assertTrue(binary.parent.name.startswith(f"workbench-{runtime_install.WORKBENCH_VERSION}-"))
 
     def test_actual_venv_console_script_with_spaces_is_not_relocated(self):
         with TemporaryDirectory() as directory:
@@ -135,7 +135,7 @@ class RuntimeInstallTests(unittest.TestCase):
             )
             self.assertEqual(
                 [path for path in (root / "runtimes").iterdir()
-                 if path.name.startswith("workbench-0.2.0-")], []
+                 if path.name.startswith(f"workbench-{runtime_install.WORKBENCH_VERSION}-")], []
             )
 
     def test_verified_prebuilt_download_is_installed(self):
