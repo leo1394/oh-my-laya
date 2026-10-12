@@ -19,7 +19,9 @@ export async function api(path, options = {}) {
   if (!response.ok) {
     const detail = payload && typeof payload === 'object' ? payload.error : payload
     const message = typeof detail === 'object' ? detail.message : detail
-    throw new Error(message || `Request failed (${response.status})`)
+    const error = new Error(message || `Request failed (${response.status})`)
+    error.status = response.status
+    throw error
   }
   return payload
 }

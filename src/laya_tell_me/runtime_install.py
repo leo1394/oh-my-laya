@@ -1,5 +1,6 @@
 import hashlib
 import os
+import re
 import shlex
 import shutil
 import stat
@@ -9,10 +10,14 @@ from pathlib import Path
 from urllib import request
 
 
-WORKBENCH_VERSION = "2.0.1"
+WORKBENCH_VERSION = "2.0.2"
 # Release artifact bytes are verified before publication and pinned here.
 # Never replace an existing asset; publish a new tag when its bytes change.
 TRUSTED_RELEASES = {
+    "2.0.2": {
+        "url": "https://github.com/leo1394/oh-my-laya/releases/download/v2.0.2/laya-macos-arm64",
+        "sha256": "4ef9251d67ad6af09508981c0962baf3d521af210f561d54fa4f2f41c2ae7f11",
+    },
     "2.0.1": {
         "url": "https://github.com/leo1394/oh-my-laya/releases/download/v2.0.1/laya-macos-arm64",
         "sha256": "ae65a3c61473c121271282eaf904dbaf7b8d52cd507d79e3cc26c885a4b3558f",
@@ -66,7 +71,8 @@ def _validate_binary(path: Path, *, run=subprocess.run) -> None:
         )
     except (OSError, subprocess.SubprocessError) as error:
         raise RuntimeError(f"Unable to execute Laya Workbench binary {path}: {error}") from error
-    if result.stdout.strip() != f"laya {WORKBENCH_VERSION}":
+    modern = re.fullmatch(r"laya version " + re.escape(WORKBENCH_VERSION) + r"(?:-dev)? \(\d{4}-\d{2}-\d{2}\)\nhttps://github.com/leo1394/oh-my-laya\n", result.stdout)
+    if result.stdout.strip() != f"laya {WORKBENCH_VERSION}" and not modern:
         raise RuntimeError(
             f"Unexpected Laya Workbench version from {path}: {result.stdout.strip()!r}; "
             f"expected 'laya {WORKBENCH_VERSION}'"
@@ -146,6 +152,7 @@ def _environment(binary: Path, python: Path, model_dir: Path, workbench_dir: Pat
         "LAYA_MODEL_DIR": model_dir,
         "LAYA_WORKBENCH_DIR": workbench_dir,
         "LAYA_SNAKE_BIN": python.parent / "laya-snake",
+        "LAYA_NATIVE_USAGE_SYNC": "1",
     }
     exports = "".join(
         f"export {name}={shlex.quote(str(value))}\n" for name, value in values.items()
@@ -233,6 +240,7 @@ def install_launchers(
             changed.append(target)
         _validate_binary(binary)
         subprocess.run([str(command), "--version"], check=True, capture_output=True, timeout=10)
+        install_cli_resources(binary, command.parent.parent)
         return command, stdio
     except BaseException:
         restore_error = None
@@ -253,6 +261,44 @@ def install_launchers(
             staged.unlink(missing_ok=True)
         for backup in rollback.values():
             backup.unlink(missing_ok=True)
+
+
+def install_cli_resources(binary: Path, prefix: Path) -> None:
+    version = subprocess.check_output([str(binary), '--version'], text=True, timeout=10)
+    if not version.startswith('laya version '):
+        print('+ legacy prebuilt binary: manual/completion require a newer CLI build')
+        return
+    specs = {
+        prefix / 'share/man/man1/laya.1': ['__manpage'],
+        prefix / 'share/bash-completion/completions/laya': ['completion', 'bash'],
+        prefix / 'share/zsh/site-functions/_laya': ['completion', 'zsh'],
+        prefix / 'share/fish/vendor_completions.d/laya.fish': ['completion', 'fish'],
+    }
+    # Reuse a conventional user completion directory when already present;
+    # do not create or rewrite shell startup configuration.
+    user_zsh = Path.home() / '.zsh/completions'
+    if prefix == Path.home() / '.local' and user_zsh.is_dir():
+        specs[user_zsh / '_laya'] = ['completion', 'zsh']
+    # Finish generation before replacing anything, then recover on partial failure.
+    contents = {path: subprocess.check_output([str(binary), *args], timeout=10)
+                for path, args in specs.items()}
+    if any(not value.strip() for value in contents.values()):
+        raise RuntimeError('CLI generated an empty manual or completion')
+    snapshots = {path: _snapshot(path) for path in specs}
+    changed = []
+    try:
+        for path, content in contents.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _restore(path, (content, 0o644))
+            changed.append(path)
+    except BaseException:
+        for path in reversed(changed):
+            _restore(path, snapshots[path])
+        raise
+    print(f'+ installed man page and Bash/Zsh/Fish completion under {prefix / "share"}')
+    print(f'+ if needed: export MANPATH="{prefix / "share/man"}:$MANPATH" (keeps system manuals)')
+    print(f'+ Bash: source "{prefix / "share/bash-completion/completions/laya"}"')
+    print(f'+ Zsh: add "{prefix / "share/zsh/site-functions"}" to fpath before compinit; Fish: use its vendor completion path')
 
 
 def install_wrapper(

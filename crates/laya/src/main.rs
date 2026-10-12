@@ -7,10 +7,9 @@ use std::os::unix::{fs::OpenOptionsExt,process::CommandExt};
 #[tokio::main(flavor="multi_thread",worker_threads=2)]
 async fn main() -> Result<()> {
     let args:Vec<String>=std::env::args().skip(1).collect();
+    if laya::cli::discovery(&args)? {return Ok(());}
     let root=runtime::root();
     match args.first().map(String::as_str).unwrap_or("--help") {
-        "--version"=>println!("laya {}",env!("CARGO_PKG_VERSION")),
-        "--help"|"-h"=>println!("Oh My Laya Decision Workbench\nUsage: laya dashboard [--port PORT] [--no-open] | status | stop | --snake [options]\nDefault: http://127.0.0.1:18686 (override with --port or LAYA_PORT; 0 requests a temporary port)\nInternal: laya mcp | service [--port PORT]"),
         "service"=> {
             let port=match command_port(&args[1..],false)? {Some(port)=>port,None=>runtime::configured_port()?};
             laya::service::run_with_port(root,port).await?;
@@ -28,7 +27,7 @@ async fn main() -> Result<()> {
         }
         "status"=>println!("{}",serde_json::to_string_pretty(&runtime::status(&root).await?)?),
         "stop"=>println!("{}",runtime::rpc(&root,&Request::new("stop",json!({}))).await?),
-        "--snake"=> {
+        "--snake"|"snake"=> {
             if let Ok(status)=runtime::rpc(&root,&Request::new("status",json!({}))).await {
                 if status["worker"]["busy"]==true || status["worker"]["queued"].as_u64().unwrap_or(0)>0 { bail!("Laya is busy; finish active tasks before starting the demo"); }
                 runtime::rpc(&root,&Request::new("stop",json!({}))).await?;
@@ -46,7 +45,7 @@ async fn main() -> Result<()> {
             runtime::inherit_model_lock(&mut command,&model_lock);
             return Err(command.exec().into());
         }
-        other=>bail!("unknown command: {other}"),
+        other=>return Err(laya::cli::unknown("command",other,laya::cli::COMMANDS,"")),
     }
     Ok(())
 }
@@ -58,7 +57,7 @@ fn command_port(args:&[String],dashboard:bool)->Result<Option<u16>> {
         if dashboard && arg=="--no-open" {continue;}
         let value=if arg=="--port" {values.next().context("--port requires a value")?.as_str()}
             else if let Some(value)=arg.strip_prefix("--port=") {value}
-            else {bail!("unknown option: {arg}");};
+            else {return Err(laya::cli::unknown("option",arg,if dashboard {&["--port","--no-open","--help"]} else {&["--port","--help"]},if dashboard {" dashboard"} else {" service"}));};
         if port.is_some() {bail!("--port may only be supplied once");}
         port=Some(runtime::parse_port(value)?);
     }

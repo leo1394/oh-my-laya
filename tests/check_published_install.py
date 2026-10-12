@@ -310,7 +310,9 @@ def main():
         server = install_dir / "bin" / "oh-my-laya-mcp"
         version = run([command, "--version"], environment).strip()
         expected = (Path(__file__).resolve().parents[1] / "VERSION.txt").read_text().strip()
-        if version != f"laya {expected}":
+        release_date = (Path(__file__).resolve().parents[1] / "RELEASE_DATE.txt").read_text().strip()
+        expected_output = f"laya version {expected} ({release_date})\nhttps://github.com/leo1394/oh-my-laya"
+        if version != expected_output:
             raise RuntimeError(f"unexpected installed version: {version!r}")
         verify_idle_status(status(command, environment))
         verify_manifest(install_dir, environment)

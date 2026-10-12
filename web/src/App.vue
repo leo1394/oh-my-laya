@@ -11,6 +11,7 @@ import ExecutionEvidence from './ExecutionEvidence.vue'
 import DateRangePicker from './DateRangePicker.vue'
 import SquadRouting from './SquadRouting.vue'
 import LiveActivity from './LiveActivity.vue'
+import { decisionRoute, rememberRoute } from './decisionNavigation.js'
 import {
   dateRangeBounds,
   decisionQuery,
@@ -67,6 +68,8 @@ const dateRange = ref(presetDateRange('today'))
 const dateBounds = computed(() => dateRangeBounds(dateRange.value))
 const decisions = ref([])
 const selectedDecision = ref(null)
+const detailOrigin = ref('cases')
+let detailRequest = 0
 const rawEvidenceOpen = ref(false)
 const observedPair = (pair) => pair?.model && pair?.reasoning_effort ? pair.model + ' / ' + pair.reasoning_effort : t('Not verified', '未核实')
 const cases = ref([])
@@ -182,7 +185,7 @@ function loadOverview() {
 }
 
 async function focusPriorityCases() {
-  activeTab.value = 'cases'
+  navigateTab('cases')
   queueFilters.status = 'pending'
   queueFilters.risk = ''
   queueFilters.source = ''
@@ -207,14 +210,45 @@ function changeQueuePage(delta) {
   return loadDecisions()
 }
 
-async function openDecision(decision) {
+function navigateTab(tab) {
+  detailRequest += 1
+  activeTab.value = tab
+  rememberRoute(window, { tab, scrollY: 0 })
+}
+
+async function restoreRoute() {
+  const route = decisionRoute(window.location)
+  if (route.tab === 'detail') {
+    detailOrigin.value = route.from
+    await openDecision({ id: route.id }, false)
+  } else {
+    detailRequest += 1
+    activeTab.value = route.tab
+    await nextTick()
+    window.scrollTo(0, window.history.state?.layaRoute?.scrollY || 0)
+  }
+}
+
+function backFromDecision() {
+  if (window.history.state?.layaRoute?.returnEntry) window.history.back()
+  else navigateTab(detailOrigin.value)
+}
+
+async function openDecision(decision, navigate = true) {
   rawEvidenceOpen.value = false
   const id = itemId(decision)
   if (!id) return
+  if (navigate && activeTab.value !== 'detail') {
+    detailOrigin.value = activeTab.value === 'queue' ? 'queue' : 'cases'
+    rememberRoute(window, { tab: detailOrigin.value, scrollY: window.scrollY })
+    rememberRoute(window, { tab: 'detail', id, from: detailOrigin.value, returnEntry: true }, true)
+    window.scrollTo(0, 0)
+  }
+  const request = ++detailRequest
   activeTab.value = 'detail'
   selectedDecision.value = null
   const payload = await load('detail', () => api(`/decisions/${encodeURIComponent(id)}`))
-  if (!payload) return
+  if (!payload || request !== detailRequest || activeTab.value !== 'detail') return
   selectedDecision.value = payload.item || payload.decision || payload
   const reviewHistory = Array.isArray(selectedDecision.value.reviews) ? selectedDecision.value.reviews : []
   const latestReview = reviewHistory[reviewHistory.length - 1]
@@ -322,7 +356,7 @@ async function deleteDecision() {
     method: 'DELETE'
   }, t("Decision deleted.", "决策已删除。"), async () => {
     selectedDecision.value = null
-    activeTab.value = 'cases'
+    backFromDecision()
     await Promise.all([loadDecisions(), loadStatus(), loadOverview()])
   })
 }
@@ -431,15 +465,23 @@ async function startExport() {
 async function pairFromFragment() {
   const fragment = new URLSearchParams(window.location.hash.slice(1))
   const code = fragment.get('pair')
-  if (!code) return true
   pairing.value = true
+  errors.pairing = ''
   try {
-    await api('/pair', { method: 'POST', body: jsonBody({ code }) })
-    history.replaceState(null, '', `${window.location.pathname}${window.location.search}`)
-    showNotice(t("Workbench paired with the local service.", "工作台已连接本地服务。"))
+    // A trusted cookie survives service upgrades; a stale one-use URL need not re-pair.
+    try {
+      await api('/session', { method: 'POST' })
+    } catch (error) {
+      if (error.status !== 401 || !code) throw error
+      await api('/pair', { method: 'POST', body: jsonBody({ code }) })
+    }
+    if (code) history.replaceState(history.state, '', `${window.location.pathname}${window.location.search}`)
+    if (code) showNotice(t("Workbench paired with the local service.", "工作台已连接本地服务。"))
     return true
   } catch (error) {
-    errors.pairing = errorMessage(error)
+    errors.pairing = error.status === 401
+      ? t('This browser is not paired, or its trust has expired. Run laya dashboard once to authorize it. After pairing, direct visits and refreshes work across service restarts; opening the page renews trust for 30 days.', '此浏览器尚未配对或授权已过期。运行一次 laya dashboard 完成授权；之后可直接访问和刷新，服务重启不影响授权，每次打开页面续期 30 天。')
+      : t('Unable to connect securely to the local service. Check that Laya is running and retry.', '无法安全连接本地服务，请确认 Laya 正在运行后重试。')
     return false
   } finally {
     pairing.value = false
@@ -515,15 +557,29 @@ watch(dateRange, () => {
   Promise.all([loadOverview(), loadDecisions(), loadCases()])
 }, { deep: true })
 
-onMounted(async () => {
-  setLanguage(locale.value)
+async function initializeBrowser() {
+  if (pairing.value) return
   if (await pairFromFragment()) {
     await loadAll()
+    await restoreRoute()
+    window.addEventListener('popstate', restoreRoute)
     connectEvents()
   }
+}
+
+function pairOnHashChange() {
+  if (new URLSearchParams(window.location.hash.slice(1)).has('pair')) initializeBrowser()
+}
+
+onMounted(async () => {
+  setLanguage(locale.value)
+  window.addEventListener('hashchange', pairOnHashChange)
+  await initializeBrowser()
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('popstate', restoreRoute)
+  window.removeEventListener('hashchange', pairOnHashChange)
   events?.close()
   clearTimeout(noticeTimer)
   clearTimeout(refreshTimer)
@@ -534,17 +590,17 @@ onBeforeUnmount(() => {
   <div class="app-shell">
     <aside class="rail">
       <div class="brand"><img class="brand-mark" src="/logo.svg" alt="" width="42" height="42"/><div><strong>Oh My Laya</strong><span>{{ t('Decision workbench', '决策工作台') }}</span></div></div>
-      <nav :aria-label="t('Navigation', '导航')"><button v-for="tab in tabs" :key="tab.id" class="nav-item" :class="{ active: activeTab === tab.id || (activeTab === 'detail' && tab.id === 'cases') }" @click="activeTab = tab.id"><span>{{ tab.number }}</span>{{ tab.label }}</button></nav>
+      <nav :aria-label="t('Navigation', '导航')"><button v-for="tab in tabs" :key="tab.id" class="nav-item" :class="{ active: activeTab === tab.id || (activeTab === 'detail' && tab.id === detailOrigin) }" @click="navigateTab(tab.id)"><span>{{ tab.number }}</span>{{ tab.label }}</button></nav>
       <div class="rail-status"><span class="signal" :class="{ ok: serviceHealthy }"></span><div><strong>{{ serviceHealthy ? t('Service ready', '服务就绪') : t('Service unavailable', '服务不可用') }}</strong><span>{{ label(eventState) }}</span></div></div>
       <p class="rail-note">{{ t('Your decisions. Kept on this device.', '决策与反馈，保留在本机。') }}</p>
     </aside>
     <main>
       <header class="topbar"><div><p class="eyebrow brand-tagline">Oh My Laya — Reflect. Route. Refine.</p><h1>{{ activeTab === 'detail' ? t('Review case', '复核案例') : tabs.find(tab => tab.id === activeTab)?.label }}</h1></div><div class="top-actions"><select :value="locale" @change="setLanguage($event.target.value)" aria-label="Language / 语言"><option value="en">English</option><option value="zh">简体中文</option></select><button v-if="activeTab !== 'queue'" class="icon-button" :aria-label="t('Refresh', '刷新')" @click="loadAll">↻</button></div></header>
-      <div v-if="errors.pairing" class="inline-error">{{ t('Unable to pair with the service.', '无法连接本地服务。') }} {{ errors.pairing }}</div>
+      <div v-if="errors.pairing" class="inline-error" role="alert">{{ errors.pairing }}</div>
       <div v-else-if="pairing" class="page-state">{{ t('Connecting…', '连接中…') }}</div>
       <template v-else>
         <div v-for="[key, message] in Object.entries(errors).filter(([key, message]) => message && !['pairing','status','overview','dateRange','settings','decisions','detail','review','tiers','createVersion','cases','versions','saveSettings'].includes(key))" :key="key" class="inline-error" role="alert">{{ message }}</div>
-        <section v-if="activeTab === 'queue'" class="page-grid queue-page">
+        <section v-show="activeTab === 'queue'" class="page-grid queue-page">
           <div class="overview-toolbar"><span class="overview-label">{{ t('Activity & usage', '活动与用量') }}</span><div class="overview-controls"><button class="button subtle" :disabled="!liveActivity" @click="liveActivity?.togglePause()">{{ liveActivity?.paused ? t('Resume display', '继续显示') : t('Pause display', '暂停显示') }}</button><button class="button subtle" @click="loadAll"><span aria-hidden="true">↻</span> {{ t('Refresh', '刷新') }}</button><DateRangePicker v-model="dateRange" compact/></div></div>
           <div v-if="errors.dateRange" class="inline-error" role="alert">{{ errors.dateRange }}</div>
           <section class="overview-metrics panel" :aria-label="t('Usage summary', '用量概览')">
@@ -560,7 +616,7 @@ onBeforeUnmount(() => {
           <div v-if="errors.status || errors.overview" class="inline-error">{{ errors.status || errors.overview }}</div>
         </section>
         <section v-if="activeTab === 'detail'" class="detail-page">
-          <button class="text-button" @click="activeTab = 'cases'">← {{ t('Case study', '返回案例学习') }}</button>
+          <button class="text-button" @click="backFromDecision">← {{ detailOrigin === 'queue' ? t('Back to recorded decisions', '返回已记录决策') : t('Back to Case study', '返回案例学习') }}</button>
           <p v-if="loading.detail">{{ t('Loading…', '加载中…') }}</p><p v-else-if="errors.detail" class="inline-error">{{ errors.detail }}</p>
           <template v-else-if="selectedDecision">
             <div class="detail-title"><h2>{{ decisionTitle(selectedDecision) }}</h2><ReviewSignals :decision="selectedDecision"/></div>

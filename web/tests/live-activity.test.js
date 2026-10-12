@@ -1,12 +1,20 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
+import { readFileSync } from 'node:fs'
 import { createServer } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { createSSRApp } from 'vue'
 import { renderToString } from '@vue/server-renderer'
 import { activityBounds, activityCharts, activityCurve, activityLogTime, activityPair, activityPath, activityRecommendation, activityRequestGate, activityTime, activityWorker, localDayBounds, pausedSnapshotSafe } from '../src/liveActivity.js'
 import { setLanguage } from '../src/i18n.js'
+
+test('decision section title precedes right-aligned search and fullscreen controls', () => {
+  const source = readFileSync(new URL('../src/LiveActivity.vue', import.meta.url), 'utf8')
+  assert.match(source, /class="panel-head log-toolbar"><h3>.*?<\/h3><div class="log-actions"><input.*?<button class="button subtle log-fullscreen"/)
+  assert.match(source, /\.log-actions \{[^}]*margin-left: auto/)
+  assert.doesNotMatch(source, /\.log-toolbar h3 \{[^}]*order:/)
+})
 
 test('log search uses bounded server pagination and safely encodes literal queries', () => {
   const path = activityPath({ start: 0, end: 100 }, { offset: 10, search: '案例 & 100%' })

@@ -128,6 +128,8 @@ laya dashboard
 
 工作台地址为 **http://127.0.0.1:18686**。命令会启动服务并配对浏览器。添加 `--port 18687` 可指定其他端口；更换前先用 `laya stop` 停止已运行的服务。
 
+首次配对后，可以直接访问或刷新该地址，服务重启或升级不会使授权失效。每次打开工作台会将浏览器授权续期 30 天。更换浏览器、清除 Cookie 或授权过期后，需再次运行 `laya dashboard`；授权及同源校验始终保留。
+
 ![决策工作台概览，使用示例数据展示](assets/readme/dashboard-zh.png)
 
 *实际工作台界面，使用合成演示数据；不是产品实测节省率，也不含个人用量。*
@@ -138,7 +140,28 @@ laya dashboard
 
 预估不等于实测节省；缺失用量明确标注，负收益不会隐藏。首次评分与后续纠正分别保留。案例只有经过评估和明确启用才影响后续决策，采集不等于自动训练模型权重。
 
+开启采集与反馈重试后，已结束且具备可验证 Laya 回执的 Codex 任务会定期对账主代理／子代理的原生 Token 计数。完成后通常最多等待约七分钟；证据缺失或有歧义时不会补成零。若显示延迟，可查看 `laya status` 中的 `native_usage_sync`。
+
 ## 更新与恢复
+
+### 命令帮助
+
+使用 `laya version`（或 `laya --version`）、`laya help`、`laya help dashboard` 查看版本与命令帮助。`man laya` 提供本地手册。安装器会安装 Bash、Zsh、Fish 补全，也可通过 `laya completion <shell>` 重新生成。
+
+用户目录安装后，若 Shell 未自动加载，可配置：
+
+```sh
+export MANPATH="$HOME/.local/share/man:${MANPATH:-}"
+# Bash
+source ~/.local/share/bash-completion/completions/laya
+# Zsh：在 Shell 配置中的 compinit 之前加入
+fpath=(~/.local/share/zsh/site-functions $fpath)
+autoload -Uz compinit && compinit
+```
+
+Fish 使用默认 XDG 数据目录时会自动读取 `~/.local/share/fish/vendor_completions.d`。安装器不会改写 Shell 启动文件。
+
+### 升级
 
 重新运行安装器即可更新，本地自定义内容不会被静默覆盖。配套 Skill 来自仓库固定版本的子模块。默认安装目录：`~/.local/share/oh-my-laya/`。
 

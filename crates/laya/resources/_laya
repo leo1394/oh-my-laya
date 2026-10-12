@@ -1,0 +1,26 @@
+#compdef laya
+_laya() {
+    local -a commands
+    commands=(dashboard status stop snake service mcp version help completion)
+    if (( CURRENT == 2 )); then
+        compadd -- $commands --help --version --snake
+    elif [[ $words[2] == help && CURRENT == 3 ]]; then
+        compadd -- $commands
+    elif [[ $words[2] == completion && CURRENT == 3 ]]; then
+        compadd -- bash zsh fish
+    elif [[ $words[2] == dashboard ]]; then
+        _arguments '--help[Show help]' '--port[Local port; default 18686]:port:' '--no-open[Print URL only]'
+    elif [[ $words[2] == service ]]; then
+        _arguments '--help[Show help]' '--port[Local port; default 18686]:port:'
+    elif [[ $words[2] == snake || $words[2] == --snake ]]; then
+        _arguments '--help[Show help]' '--model[Local model directory]:directory:_files -/' \
+            '--record[Write decisions as JSONL]:file:_files' '--prompt[Prompt style]:style:(compact detailed)' \
+            '--optimize[Compile model]' '--width[Board width]:number:' '--height[Board height]:number:' \
+            '--seed[Random seed]:number:' '--initial-length[Initial length]:number:' '--fps[Decisions per second]:number:' \
+            '--max-speed[No pacing]' '--duration[Stop after seconds]:seconds:' '--steps[Stop after steps]:number:' \
+            '--unassisted[Disable safety shield]' '--headless[No terminal display]' '--no-alt-screen[Keep final frame]'
+    else
+        _arguments '--help[Show help]'
+    fi
+}
+_laya "$@"

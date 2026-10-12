@@ -1,0 +1,78 @@
+.TH LAYA 1 "@DATE@" "Oh My Laya @VERSION@"
+.SH NAME
+laya \- native local AI decisions, routing, and learning
+.SH SYNOPSIS
+.B laya
+.I command
+.RI [ options ]
+.SH DESCRIPTION
+Oh My Laya provides a local decision workbench and an MCP bridge for agent hosts.
+Help, version, completion and manual generation do not start services or load models.
+.SH COMMANDS
+.TP
+.B dashboard [--port PORT] [--no-open]
+Start the service if needed and open the workbench. Default port is 18686.
+Port 0 selects a temporary port. --no-open prints a private pairing URL instead.
+.TP
+.B status
+Print JSON service, recording, usage reconciliation and resource status without starting it.
+.TP
+.B stop
+Stop the running service. Stored records are preserved.
+.TP
+.B snake [demo-options]
+Run the installed offline demo with local weights. Alias: --snake.
+Stops an idle service; refuses when inference is busy. Demo arguments are forwarded unchanged.
+.TP
+.B mcp
+Run the MCP stdio bridge. Intended for agent hosts. Starts the local service on demand.
+.TP
+.B service [--port PORT]
+Run the local service in the foreground.
+.TP
+.B version
+Print version, release date and repository. Alias: --version. Development builds use -dev.
+.TP
+.B help [command]
+Show general or command help. Aliases: --help and command --help.
+.TP
+.B completion bash|zsh|fish
+Print shell completion. No runtime dependencies or service required.
+.SH EXAMPLES
+.nf
+laya dashboard
+laya dashboard --port 18686 --no-open
+laya status
+laya help dashboard
+laya version
+.fi
+.SH ENVIRONMENT
+.TP
+.B LAYA_PORT
+Default local HTTP port.
+.TP
+.B LAYA_WORKBENCH_DIR
+Workbench data directory. Defaults to ~/.local/share/oh-my-laya/workbench.
+.TP
+.B LAYA_PYTHON
+Installed Python interpreter used for local inference and native usage reconciliation.
+.TP
+.B LAYA_NATIVE_USAGE_SYNC
+Set to 1 by the installer to enable periodic native Codex usage reconciliation.
+Recording and replay consent must also be enabled. No model is loaded for reconciliation.
+.SH FILES
+~/.local/share/oh-my-laya/workbench/laya.sqlite3 stores local decisions and feedback.
+Native usage reconciliation reads local Codex metadata and writes numeric feedback only
+for verifiably matched recorded decisions. Estimates are hypothetical, not measured savings.
+.SH EXIT STATUS
+0 on success; nonzero on invalid input or an operation failure.
+.SH CAVEATS
+Inference and the demo require the installed Python runtime and local weights.
+Collection is never enabled by a help or dashboard command.
+Keep pairing URLs private. Completion activation depends on your shell configuration.
+.SH SEE ALSO
+.BR bash (1),
+.BR zsh (1),
+.BR fish (1)
+.PP
+https://github.com/leo1394/oh-my-laya

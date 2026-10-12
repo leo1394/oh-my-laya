@@ -3,9 +3,37 @@ use anyhow::{bail, Context, Result};
 use axum::{extract::{Path as UrlPath, Query, State}, http::{HeaderMap, StatusCode}, response::{IntoResponse, Response}, routing::{get, post}, Json, Router};
 use fs2::FileExt;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{collections::HashMap, os::unix::fs::PermissionsExt, path::PathBuf, sync::{Arc,atomic::{AtomicBool,AtomicU64,Ordering}}, time::Duration};
 use tokio::{io::{AsyncReadExt, AsyncWriteExt, BufReader}, net::{TcpListener, UnixListener}, sync::{Mutex, Notify, RwLock}};
 use crate::assets::serve as assets;
+
+const BROWSER_SESSION_SECONDS:i64=30*24*3600;
+
+fn session_digest(token:&str)->String {format!("{:x}",Sha256::digest(token.as_bytes()))}
+
+fn browser_token(headers:&HeaderMap)->Option<&str> {
+    headers.get("cookie").and_then(|v|v.to_str().ok()).unwrap_or("").split(';').find_map(|item|item.trim().strip_prefix("laya_session="))
+}
+
+fn load_browser_sessions(root:&std::path::Path)->Result<HashMap<String,i64>> {
+    let path=root.join("browser-sessions.json");
+    let metadata=match std::fs::symlink_metadata(&path) {
+        Ok(value)=>value,
+        Err(error) if error.kind()==std::io::ErrorKind::NotFound=>return Ok(HashMap::new()),
+        Err(error)=>return Err(error.into()),
+    };
+    if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 {bail!("invalid: browser session file must be private and not symlinked");}
+    let mut sessions:HashMap<String,i64>=serde_json::from_slice(&std::fs::read(path)?).context("invalid browser session file")?;
+    sessions.retain(|key,expiry|key.len()==64 && key.bytes().all(|b|b.is_ascii_hexdigit()) && *expiry>now());
+    Ok(sessions)
+}
+
+fn session_response(token:&str)->Response {
+    let mut response=Json(json!({"paired":true})).into_response();
+    response.headers_mut().insert("set-cookie",format!("laya_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={BROWSER_SESSION_SECONDS}").parse().unwrap());
+    response
+}
 
 pub fn worker_cases(memory: &Value) -> Value {
     json!(memory["cases"].as_array().into_iter().flatten().map(|case|json!({"id":case["id"],"summary":case["summary"].as_str().map(str::to_string).unwrap_or_else(||case["summary"].to_string()),"labels":case["labels"]})).collect::<Vec<_>>())
@@ -82,6 +110,8 @@ impl App {
         value["service"] = serde_json::to_value(&self.info)?;
         value["supported_contracts"] = json!(["orchestration_plan_v1","dispatch_receipt_v1","attempt_outcome_v1"]);
         value["worker"] = self.worker.status();
+        value["native_usage_sync"] = std::fs::read(self.root.join("native-usage-sync.json")).ok()
+            .and_then(|bytes|serde_json::from_slice::<Value>(&bytes).ok()).unwrap_or_else(||json!({"status":"not_started"}));
         let worker_pid=value["worker"]["pid"].as_u64().unwrap_or(0);
         let pids=if worker_pid>0 {format!("{},{}",self.info.pid,worker_pid)} else {self.info.pid.to_string()};
         value["resources"]=match tokio::time::timeout(Duration::from_secs(1),tokio::process::Command::new("/bin/ps").args(["-p",&pids,"-o","pid=","-o","rss=","-o","%cpu="]).output()).await {
@@ -277,10 +307,20 @@ impl App {
             let origin = format!("http://{host}");
             if headers.get("origin").and_then(|v| v.to_str().ok()) != Some(origin.as_str()) { bail!("forbidden: invalid origin"); }
         }
-        let cookie = headers.get("cookie").and_then(|v| v.to_str().ok()).unwrap_or("");
-        let session = cookie.split(';').find_map(|item| item.trim().strip_prefix("laya_session="));
         let sessions = self.sessions.lock().await;
-        if session.and_then(|s| sessions.get(s)).copied().unwrap_or(0) < now() { bail!("unauthorized: open laya dashboard to pair this browser"); }
+        if browser_token(headers).and_then(|s|sessions.get(&session_digest(s))).copied().unwrap_or(0) <= now() { bail!("unauthorized: browser pairing required or expired"); }
+        Ok(())
+    }
+
+    async fn remember_browser(&self,token:&str,renew:bool)->Result<()> {
+        let mut sessions=self.sessions.lock().await;
+        let mut updated=sessions.clone();
+        updated.retain(|_,expiry|*expiry>now());
+        let key=session_digest(token);
+        if renew && !updated.contains_key(&key) {bail!("unauthorized: browser pairing required or expired");}
+        updated.insert(key,now()+BROWSER_SESSION_SECONDS);
+        write_private(&self.root.join("browser-sessions.json"),&serde_json::to_value(&updated)?)?;
+        *sessions=updated;
         Ok(())
     }
 }
@@ -301,10 +341,27 @@ async fn pair(State(app): State<App>, headers: HeaderMap, Json(body): Json<Value
     if headers.get("host").and_then(|v|v.to_str().ok()) != Some(host.as_str()) || headers.get("origin").and_then(|v|v.to_str().ok()) != Some(origin.as_str()) { return failure(anyhow::anyhow!("forbidden: invalid pairing origin")); }
     let code = body["code"].as_str().unwrap_or("");
     if app.pairing.lock().await.remove(code).unwrap_or(0) < now() { return failure(anyhow::anyhow!("unauthorized: pairing code expired or already used")); }
-    let token = uuid::Uuid::new_v4().to_string();
-    app.sessions.lock().await.insert(token.clone(),now()+8*3600);
-    let mut response = Json(json!({"paired":true})).into_response();
-    response.headers_mut().insert("set-cookie",format!("laya_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800").parse().unwrap());
+    let token = format!("{}{}",uuid::Uuid::new_v4().simple(),uuid::Uuid::new_v4().simple());
+    if let Err(error)=app.remember_browser(&token,false).await {return failure(error);}
+    session_response(&token)
+}
+
+async fn renew_browser(State(app):State<App>,headers:HeaderMap)->Response {
+    if let Err(error)=app.authenticated(&headers,true).await {return failure(error);}
+    let token=browser_token(&headers).unwrap();
+    if let Err(error)=app.remember_browser(token,true).await {return failure(error);}
+    session_response(token)
+}
+
+async fn forget_browser(State(app):State<App>,headers:HeaderMap)->Response {
+    if let Err(error)=app.authenticated(&headers,true).await {return failure(error);}
+    let mut sessions=app.sessions.lock().await;
+    let mut updated=sessions.clone();
+    updated.remove(&session_digest(browser_token(&headers).unwrap()));
+    if let Err(error)=write_private(&app.root.join("browser-sessions.json"),&json!(updated)) {return failure(error);}
+    *sessions=updated;
+    let mut response=Json(json!({"paired":false})).into_response();
+    response.headers_mut().insert("set-cookie","laya_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0".parse().unwrap());
     response
 }
 
@@ -523,8 +580,9 @@ async fn api_delete(State(app): State<App>, UrlPath(path): UrlPath<String>, head
 
 fn write_private(path: &std::path::Path, value: &Value) -> Result<()> {
     use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
     let temp=path.with_extension(format!("{}.tmp",uuid::Uuid::new_v4()));
-    let mut file=std::fs::OpenOptions::new().create_new(true).write(true).open(&temp)?;
+    let mut file=std::fs::OpenOptions::new().create_new(true).write(true).mode(0o600).open(&temp)?;
     std::fs::set_permissions(&temp,std::fs::Permissions::from_mode(0o600))?;
     file.write_all(&serde_json::to_vec(value)?)?; file.sync_all()?;
     std::fs::rename(temp,path)?;
@@ -571,7 +629,8 @@ pub async fn run_with_port(root:PathBuf,port:u16)->Result<()> {
     write_private(&root.join("service.json"),&serde_json::to_value(&info)?)?;
     let python=std::env::var("LAYA_PYTHON").unwrap_or_else(|_|"python3".into());
     let idle=std::env::var("LAYA_IDLE_SECONDS").ok().and_then(|s|s.parse().ok()).unwrap_or(300);
-    let app=App {store,worker:Worker::start(python,Duration::from_secs(idle),root.join("model.lock")),root:root.clone(),info,privacy:Arc::new(Mutex::new(())),maintenance:Arc::new(RwLock::new(())),job_guard:Arc::new(Mutex::new(())),changed:Arc::new(Notify::new()),shutdown:Arc::new(Notify::new()),stopping:Arc::new(AtomicBool::new(false)),assessment_epoch:Arc::new(AtomicU64::new(0)),sessions:Arc::new(Mutex::new(HashMap::new())),pairing:Arc::new(Mutex::new(HashMap::new()))};
+    let sessions=load_browser_sessions(&root)?;
+    let app=App {store,worker:Worker::start(python,Duration::from_secs(idle),root.join("model.lock")),root:root.clone(),info,privacy:Arc::new(Mutex::new(())),maintenance:Arc::new(RwLock::new(())),job_guard:Arc::new(Mutex::new(())),changed:Arc::new(Notify::new()),shutdown:Arc::new(Notify::new()),stopping:Arc::new(AtomicBool::new(false)),assessment_epoch:Arc::new(AtomicU64::new(0)),sessions:Arc::new(Mutex::new(sessions)),pairing:Arc::new(Mutex::new(HashMap::new()))};
     let internal=app.clone();
     let unix_task=tokio::spawn(async move {
         while let Ok((stream,_))=unix.accept().await {
@@ -639,7 +698,37 @@ pub async fn run_with_port(root:PathBuf,port:u16)->Result<()> {
             tokio::time::sleep(Duration::from_secs(10)).await;
         }
     });
+    let usage=app.clone();
+    let usage_task=tokio::spawn(async move {
+        if std::env::var("LAYA_NATIVE_USAGE_SYNC").as_deref()!=Ok("1") {return;}
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        loop {
+            let enabled=usage.store.call("settings/get",json!({})).await
+                .map(|settings|settings["recording_enabled"]==true && settings["replay_enabled"]!=false).unwrap_or(false);
+            let result=if enabled {
+                let python=std::env::var("LAYA_PYTHON").unwrap_or_else(|_|"python3".into());
+                match std::env::current_exe() {
+                    Ok(executable)=> {
+                        let mut command=tokio::process::Command::new(python);
+                        command.args(["-m","laya_tell_me.usage_sync","--workbench"]).arg(&usage.root)
+                            .arg("--laya").arg(executable).arg("--deliver")
+                            .stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).kill_on_drop(true);
+                        match tokio::time::timeout(Duration::from_secs(120),command.output()).await {
+                            Ok(Ok(output))=>serde_json::from_slice::<Value>(&output.stdout).unwrap_or_else(|_|json!({"status":"unavailable","reason":"usage producer did not return a valid status"})),
+                            _=>json!({"status":"unavailable","reason":"usage producer failed or timed out"}),
+                        }
+                    },
+                    Err(_)=>json!({"status":"unavailable","reason":"executable path unavailable"}),
+                }
+            } else {json!({"status":"disabled"})};
+            let mut result=result;result["checked_at"]=json!(now());
+            let _=write_private(&usage.root.join("native-usage-sync.json"),&result);
+            // Do not load the MLX model or run a per-decision polling process.
+            tokio::time::sleep(Duration::from_secs(300)).await;
+        }
+    });
     let routes=Router::new().route("/api/v1/pair",post(pair))
+        .route("/api/v1/session",post(renew_browser).delete(forget_browser))
         .route("/api/v1/events",get(events))
         .route("/api/v1/{*path}",get(api_get).post(api_write).patch(api_write).delete(api_delete))
         .fallback(assets)
@@ -654,7 +743,7 @@ pub async fn run_with_port(root:PathBuf,port:u16)->Result<()> {
     let stop=app.shutdown.clone();
     let stopping=app.clone();
     axum::serve(tcp,routes).with_graceful_shutdown(async move {tokio::select!{_ = stop.notified()=>{},_ = tokio::signal::ctrl_c()=>{}} stopping.stopping.store(true,Ordering::Release); stopping.changed.notify_waiters();}).await?;
-    unix_task.abort(); replay_task.abort();
+    unix_task.abort(); replay_task.abort(); usage_task.abort();
     app.worker.call("release",json!({})).await?;
     std::fs::remove_file(socket)?;
     drop(lock);
@@ -747,7 +836,7 @@ mod tests {
         let dir=tempfile::tempdir().unwrap(); let app=app(dir.path());
         let mut headers=HeaderMap::new(); headers.insert("host","127.0.0.1:34567".parse().unwrap());
         assert!(app.authenticated(&headers,false).await.is_err());
-        app.sessions.lock().await.insert("test-cookie".into(),now()+60);
+        app.sessions.lock().await.insert(session_digest("test-cookie"),now()+60);
         headers.insert("cookie","laya_session=test-cookie".parse().unwrap());
         assert!(app.authenticated(&headers,false).await.is_ok());
         assert!(app.authenticated(&headers,true).await.is_err());
@@ -769,6 +858,42 @@ mod tests {
         assert_eq!(response.status(),StatusCode::UNAUTHORIZED);
         assert_eq!(app.worker.status()["pid"],0);
         assert_eq!(app.store.call("settings/get",json!({})).await.unwrap(),before);
+    }
+
+    #[tokio::test]
+    async fn browser_trust_expiry_and_failed_persistence_fail_closed() {
+        let dir=tempfile::tempdir().unwrap(); let app=app(dir.path());
+        let mut headers=HeaderMap::new();
+        headers.insert("host","127.0.0.1:34567".parse().unwrap());
+        headers.insert("origin","http://127.0.0.1:34567".parse().unwrap());
+        headers.insert("cookie","laya_session=expired".parse().unwrap());
+        app.sessions.lock().await.insert(session_digest("expired"),now()-1);
+        assert_eq!(renew_browser(State(app.clone()),headers.clone()).await.status(),StatusCode::UNAUTHORIZED);
+        assert!(!app.root.join("browser-sessions.json").exists());
+        app.remember_browser("valid",false).await.unwrap();
+        assert!(load_browser_sessions(dir.path()).unwrap().contains_key(&session_digest("valid")));
+        assert!(!load_browser_sessions(dir.path()).unwrap().contains_key(&session_digest("expired")));
+        headers.insert("cookie","laya_session=valid".parse().unwrap());
+        headers.insert("host","attacker.invalid".parse().unwrap());
+        assert!(app.authenticated(&headers,false).await.is_err());
+        let path=dir.path().join("browser-sessions.json");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(app.remember_browser("not-persisted",false).await.is_err());
+        assert!(!app.sessions.lock().await.contains_key(&session_digest("not-persisted")));
+    }
+
+    #[test]
+    fn browser_trust_file_rejects_corruption_public_permissions_and_symlinks() {
+        let dir=tempfile::tempdir().unwrap(); let path=dir.path().join("browser-sessions.json");
+        write_private(&path,&json!({"invalid":"expiry"})).unwrap();
+        assert!(load_browser_sessions(dir.path()).is_err());
+        write_private(&path,&json!({})).unwrap();
+        std::fs::set_permissions(&path,std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(load_browser_sessions(dir.path()).is_err());
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("missing"),&path).unwrap();
+        assert!(load_browser_sessions(dir.path()).is_err());
     }
 
     #[tokio::test]

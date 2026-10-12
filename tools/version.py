@@ -3,6 +3,7 @@
 import argparse
 from pathlib import Path
 import re
+from datetime import date
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +15,12 @@ def main():
     parser.add_argument('--tag')
     args = parser.parse_args()
     version = (ROOT / 'VERSION.txt').read_text().strip()
+    release_date = (ROOT / 'RELEASE_DATE.txt').read_text().strip()
+    try:
+        if date.fromisoformat(release_date).isoformat() != release_date:
+            raise ValueError()
+    except ValueError:
+        parser.error('RELEASE_DATE.txt must contain the release date as YYYY-MM-DD')
     if not re.fullmatch(r'(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)', version):
         parser.error('VERSION.txt must contain one stable semantic version')
     if args.tag and args.tag != 'v' + version:

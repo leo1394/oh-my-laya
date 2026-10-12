@@ -34,6 +34,8 @@ jobs:
             python tools/version.py --tag "$GITHUB_REF_NAME"
           fi
       - name: Build embedded web assets and release binary
+        env:
+          LAYA_RELEASE_BUILD: '1'
         run: tools/package-workbench-release.sh
       - name: Verify Rust persistence and frontend contracts before packaging
         run: |
@@ -44,6 +46,8 @@ jobs:
           python -m unittest discover -s skills/alpha-squad-coding-craft/tests
           LAYA_TEST_BINARY="$PWD/dist/workbench/laya-macos-arm64" python tests/smoke_workbench.py
           LAYA_TEST_BINARY="$PWD/dist/workbench/laya-macos-arm64" python tests/smoke_activity.py
+          LAYA_TEST_BINARY="$PWD/dist/workbench/laya-macos-arm64" python tests/smoke_usage_sync.py
+          LAYA_TEST_BINARY="$PWD/dist/workbench/laya-macos-arm64" python tests/smoke_browser_session.py
       - uses: actions/upload-artifact@v4
         with:
           name: laya-macos-arm64

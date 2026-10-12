@@ -99,6 +99,10 @@ function toggleFullscreen() {
   document.body.style.overflow = fullscreen.value ? 'hidden' : ''
   logPanel.value?.querySelector('.log-fullscreen')?.focus()
 }
+function openDetails(id) {
+  if (fullscreen.value) toggleFullscreen()
+  emit('open', id)
+}
 function fullscreenKeys(event) {
   if (!fullscreen.value) return
   if (event.key === 'Escape') { event.preventDefault(); toggleFullscreen() }
@@ -190,7 +194,7 @@ onBeforeUnmount(() => {
         <article class="panel"><div class="activity-chart-head"><h3>{{ chartTitle }}</h3><span class="worker-indicator" :class="`worker-${workerState}`" :title="workerHint"><span class="worker-dot"></span>{{ workerStatus }}</span></div><p class="activity-legend"><span class="line-key">{{ t('Cumulative (left)', '累计（左轴）') }}</span><span class="bar-key">{{ charts.singleDay ? t('Hourly starts (right)', '每小时开始数（右轴）') : charts.coarse ? t('Interval starts (right)', '每区间开始数（右轴）') : t('Daily starts (right)', '每日开始数（右轴）') }}</span><span>{{ t('Local time', '本地时间') }}</span></p><svg viewBox="-35 -12 670 155" role="img" :aria-label="`${chartTitle}: ${charts.total}`"><g class="activity-axis"><line x1="0" y1="120" x2="600" y2="120"/><line x1="0" y1="60" x2="600" y2="60"/><line x1="0" y1="0" x2="600" y2="0"/><text x="-7" y="124" text-anchor="end">0</text><text x="-7" y="64" text-anchor="end">{{ middleTick(charts.cumulativeMaximum) }}</text><text x="-7" y="4" text-anchor="end">{{ charts.cumulativeMaximum }}</text><text x="607" y="124">0</text><text x="607" y="64">{{ middleTick(charts.countMaximum) }}</text><text x="607" y="4">{{ charts.countMaximum }}</text><text v-for="tick in charts.ticks" :key="tick.x" :x="tick.x" y="140" :text-anchor="tick.x === 0 ? 'start' : tick.x === 600 ? 'end' : 'middle'">{{ tick.label }}</text></g><rect v-for="bar in charts.bars" :key="bar.start ?? bar.hour" :x="bar.x" :y="120 - bar.height" :width="bar.width" :height="bar.height" fill="#b6d7ec"><title>{{ bar.label || `${bar.hour}:00` }} · {{ bar.count }} {{ t('decisions', '次决策') }}</title></rect><path :d="charts.curve" fill="none" stroke="var(--orange)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><circle v-for="point in charts.points.filter((point, index, points) => index === points.length - 1 || point.total !== points[index - 1]?.total)" :key="point.x" :cx="point.x" :cy="120 - point.total * 120 / charts.cumulativeMaximum" r="2.5" fill="var(--orange)"><title>{{ chartTime(point) }} · {{ point.total }} {{ t('cumulative decisions', '累计决策') }}</title></circle></svg><p v-if="!charts.hasData" class="activity-empty">{{ t('No recorded decisions in selected range.', '所选日期范围内尚无已记录决策。') }}</p></article>
       </div>
       <div ref="logPanel" class="activity-log panel" :class="{ 'log-maximized': fullscreen }" :role="fullscreen ? 'dialog' : undefined" :aria-modal="fullscreen ? true : undefined" :aria-label="t('Recorded decisions', '已记录决策')">
-        <div class="panel-head log-toolbar"><button class="button subtle log-fullscreen" @click="toggleFullscreen" :aria-label="fullscreen ? t('Exit fullscreen', '退出全屏') : t('Fullscreen', '全屏显示')" :title="fullscreen ? t('Exit fullscreen', '退出全屏') : t('Fullscreen', '全屏显示')">{{ fullscreen ? '⊡' : '⛶' }}</button><h3>{{ t('Recorded decisions', '已记录决策') }}</h3><input v-model="searchInput" type="search" maxlength="200" @input="searchLogs" :aria-label="t('Search decisions', '搜索决策')" :placeholder="t('Search task, ID or role…', '搜索任务、ID 或角色…')"/></div>
+        <div class="panel-head log-toolbar"><h3>{{ t('Recorded decisions', '已记录决策') }}</h3><div class="log-actions"><input v-model="searchInput" type="search" maxlength="200" @input="searchLogs" :aria-label="t('Search decisions', '搜索决策')" :placeholder="t('Search task, ID or role…', '搜索任务、ID 或角色…')"/><button class="button subtle log-fullscreen" @click="toggleFullscreen" :aria-label="fullscreen ? t('Exit fullscreen', '退出全屏') : t('Fullscreen', '全屏显示')" :title="fullscreen ? t('Exit fullscreen', '退出全屏') : t('Fullscreen', '全屏显示')">{{ fullscreen ? '⊡' : '⛶' }}</button></div></div>
         <div class="activity-log-content" :aria-busy="loading">
         <p v-if="loading" class="activity-empty" role="status">{{ t('Updating results…', '正在更新结果…') }}</p>
         <p v-if="!rows.length" class="activity-empty">{{ search ? t('No matching decisions.', '没有匹配的决策。') : t('No recorded decisions yet.', '暂无已记录决策。') }}</p>
@@ -207,7 +211,7 @@ onBeforeUnmount(() => {
             <p v-if="!item.assignments?.length">{{ t('No assignment receipts recorded. A plan does not prove dispatch.', '未记录分配凭据。计划不能证明已派发。') }}</p>
             <div v-for="(assignment, index) in item.assignments || []" :key="assignment.attempt_ref || index" class="activity-assignment"><strong>{{ assignment.role || t('Unknown role', '角色未知') }} · {{ assignment.attempt_ref || '—' }}</strong><small>{{ time(assignment.created_at) }}</small><p>{{ t('Requested', '请求') }}: {{ pair(assignment.requested) }} · {{ t('Effective, if verified', '实际使用（如已核实）') }}: {{ pair(assignment.effective) }}</p><p>{{ t('Verified dispatch receipt', '已核验的派发凭据') }}: {{ dispatchStatus(assignment.status) }}</p></div>
             <p v-if="item.assignments_truncated">{{ t('Assignment receipts truncated in this view.', '此视图中的分配凭据已截断。') }}</p>
-            <button class="button subtle" @click="$emit('open', item.id)">{{ t('Open details', '打开详情') }}</button>
+            <button class="button subtle" @click="openDetails(item.id)">{{ t('Open details', '打开详情') }}</button>
           </div>
         </details>
         </div>
@@ -247,9 +251,9 @@ onBeforeUnmount(() => {
 .activity-log.log-maximized .activity-log-content { flex: 1; min-height: 0; max-height: none; }
 .log-toolbar { justify-content: flex-start; gap: 12px; background: white; }
 .log-toolbar h3 { margin: 0; font-size: 16px; white-space: nowrap; }
-.log-toolbar input { max-width: 320px; order: 1; }
-.log-toolbar h3 { order: 2; }
-.log-fullscreen { font-size: 20px; padding: 5px 10px; }
+.log-actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-left: auto; min-width: 0; }
+.log-toolbar input { width: 320px; max-width: 100%; min-width: 0; }
+.log-fullscreen { flex-shrink: 0; font-size: 20px; padding: 5px 10px; }
 .activity-log-content { background: #f2f6f9; max-height: 560px; overflow: auto; scrollbar-gutter: stable; }
 .log-pagination { display: flex; justify-content: flex-end; align-items: center; gap: 12px; padding: 12px 20px; border-top: 1px solid var(--line); font-size: 11px; background: white; }
 .log-pagination > span:first-child { margin-right: auto; color: var(--ink-soft); }
@@ -265,11 +269,11 @@ onBeforeUnmount(() => {
 .activity-expand { color: var(--ink-soft); font-size: 16px; flex: 0 0 12px; }
 .activity-row[open] > summary .activity-expand { transform: rotate(90deg); }
 .activity-row[open] { background: #eaf1f6; }
-.activity-row-detail { padding: 2px 20px 18px; overflow-wrap: anywhere; }
+.activity-row-detail { padding: 2px 20px 18px 44px; overflow-wrap: anywhere; }
 .activity-row-detail h4 { margin: 14px 0 4px; color: var(--ink); font-size: 12px; }
 .activity-row-detail p { margin: 5px 0; }
 .activity-assignment { margin: 7px 0; padding: 9px 12px; border-left: 2px solid var(--orange); background: var(--paper-deep); }
 .activity-assignment strong, .activity-assignment small { display: block; }
 @media (max-width: 740px) { .activity-row summary { align-items: flex-start; } }
-@media (max-width: 560px) { .log-toolbar { flex-wrap: wrap; } .log-toolbar input { max-width: none; flex-basis: 100%; } .log-pagination { gap: 8px; padding: 12px; } }
+@media (max-width: 560px) { .log-toolbar { flex-wrap: wrap; } .log-actions { width: 100%; } .log-toolbar input { width: auto; flex: 1; } .log-pagination { gap: 8px; padding: 12px; } }
 </style>

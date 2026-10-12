@@ -128,6 +128,8 @@ laya dashboard
 
 The workbench runs at **http://127.0.0.1:18686**. The command starts the service and pairs your browser. Use `--port 18687` to choose another port; stop an existing service with `laya stop` before changing it.
 
+After pairing once, you can visit or refresh that address directly—even after a service restart or upgrade. Browser trust is renewed for 30 days when you open the dashboard. A new browser, cleared cookies, or expired trust requires `laya dashboard` again; authorization and same-origin checks remain enabled.
+
 ![Decision workbench overview with illustrative sample data](assets/readme/dashboard-en.png)
 
 *Actual workbench UI with synthetic demonstration data—not measured product savings or personal usage.*
@@ -138,7 +140,28 @@ The workbench runs at **http://127.0.0.1:18686**. The command starts the service
 
 Estimates are not measured savings; incomplete usage stays marked as partial, and negative estimates remain visible. First scores are preserved alongside later corrections. Cases inform future decisions only after evaluation and explicit activation—collection is not automatic weight training.
 
+With recording and replay enabled, completed Codex turns with verifiable Laya receipts are periodically reconciled against native main/subagent token counters. Allow up to about seven minutes after completion; ambiguous or missing evidence is not filled with zero. Inspect `laya status` → `native_usage_sync` if usage is delayed.
+
 ## Update and recover
+
+### CLI reference
+
+Use `laya version` (or `laya --version`), `laya help`, and `laya help dashboard` for command details. `man laya` provides the local manual. The installer includes Bash, Zsh, and Fish completion; `laya completion <shell>` can regenerate it.
+
+For a user-local installation, if your shell does not load these automatically:
+
+```sh
+export MANPATH="$HOME/.local/share/man:${MANPATH:-}"
+# Bash
+source ~/.local/share/bash-completion/completions/laya
+# Zsh: put these before running compinit in your shell configuration
+fpath=(~/.local/share/zsh/site-functions $fpath)
+autoload -Uz compinit && compinit
+```
+
+Fish loads `~/.local/share/fish/vendor_completions.d` automatically when using its default XDG data directory. The installer does not edit shell startup files.
+
+### Upgrades
 
 Rerun the installer to update; local customizations are not silently overwritten. The companion Skill comes from the repository's pinned submodule. Default installation: `~/.local/share/oh-my-laya/`.
 

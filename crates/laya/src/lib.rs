@@ -1,4 +1,5 @@
 pub mod protocol;
+pub mod cli;
 pub(crate) mod evidence;
 pub mod worker;
 pub mod outbox;
