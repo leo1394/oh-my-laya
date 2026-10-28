@@ -91,6 +91,19 @@ export function activityWorker(snapshot, eventState, error) {
   return snapshot.worker.busy === false ? 'idle' : 'unloaded'
 }
 
+export function activityChartHover(chart, x) {
+  const points = chart.points || []
+  if (!Number.isFinite(x) || !points.length || x < 0 || x > points.at(-1).x) return null
+  const index = points.reduce((closest, point, i) => Math.abs(point.x - x) < Math.abs(points[closest].x - x) ? i : closest, 0)
+  const point = points[index]
+  const bucket = chart.singleDay ? chart.hours[Math.max(0, Math.ceil(point.x / 25) - 1)] : chart.bars[index - 1]
+  const count = index > 0 && bucket && (!chart.singleDay || bucket.observed) ? bucket.count : null
+  const minutes = Math.floor(point.x * 60 / 25)
+  const endLabel = `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`
+  const label = chart.singleDay && index > 0 ? `${String(bucket.hour).padStart(2, '0')}:00–${endLabel}` : bucket?.label
+  return { ...point, count, label, y: 120 - point.total * 120 / chart.cumulativeMaximum }
+}
+
 export function activityCharts(snapshot, nowSeconds = Date.now() / 1000) {
   const buckets = Array.isArray(snapshot?.buckets) ? snapshot.buckets : []
   const end = Number.isFinite(snapshot?.end) ? snapshot.end : Infinity

@@ -6,7 +6,7 @@ import { createServer } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { createSSRApp } from 'vue'
 import { renderToString } from '@vue/server-renderer'
-import { activityBounds, activityCharts, activityCurve, activityLogTime, activityPair, activityPath, activityRecommendation, activityRequestGate, activityTime, activityWorker, localDayBounds, pausedSnapshotSafe } from '../src/liveActivity.js'
+import { activityBounds, activityChartHover, activityCharts, activityCurve, activityLogTime, activityPair, activityPath, activityRecommendation, activityRequestGate, activityTime, activityWorker, localDayBounds, pausedSnapshotSafe } from '../src/liveActivity.js'
 import { setLanguage } from '../src/i18n.js'
 
 test('decision section title precedes right-aligned search and fullscreen controls', () => {
@@ -22,6 +22,28 @@ test('log search uses bounded server pagination and safely encodes literal queri
   assert.equal(query.get('limit'), '10')
   assert.equal(query.get('offset'), '10')
   assert.equal(query.get('q'), '案例 & 100%')
+})
+
+test('hover snaps to actual points, preserves zero and omits future or unknown counts', () => {
+  const chart = { singleDay: true, cumulativeMaximum: 4,
+    points: [{ x: 0, total: 0 }, { x: 25, total: 3 }, { x: 37.5, total: 3 }],
+    hours: [{ hour: 0, count: 3, observed: true }, { hour: 1, count: 0, observed: true }] }
+  assert.deepEqual(activityChartHover(chart, 24), { x: 25, total: 3, count: 3, label: '00:00–01:00', y: 30 })
+  assert.equal(activityChartHover(chart, 37.5).label, '01:00–01:30')
+  assert.equal(activityChartHover(chart, 37.5).count, 0)
+  assert.equal(activityChartHover(chart, 0).count, null)
+  for (const x of [null, NaN, -1, 38, 601]) assert.equal(activityChartHover(chart, x), null)
+  chart.hours[1].observed = false
+  assert.equal(activityChartHover(chart, 37).count, null)
+  assert.equal(activityChartHover({ points: [] }, 0), null)
+})
+
+test('multi-day hover uses the matching interval count and date label', () => {
+  const chart = { singleDay: false, cumulativeMaximum: 10,
+    points: [{ x: 0, total: 0 }, { x: 200, total: 4 }, { x: 600, total: 9 }],
+    bars: [{ count: 4, label: '2026-10-10' }, { count: 5, label: '2026-10-11–2026-10-12' }] }
+  assert.deepEqual(activityChartHover(chart, 590), { x: 600, total: 9, count: 5, label: '2026-10-11–2026-10-12', y: 12 })
+  assert.equal(activityChartHover(chart, 200).count, 4)
 })
 
 test('activity requests exact local calendar day bounds, including daylight saving days', () => {

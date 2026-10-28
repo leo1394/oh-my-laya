@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api } from './api.js'
 import { label, locale, t } from './i18n.js'
-import { activityBounds, activityCharts, activityLogTime, activityPair, activityPath, activityRecommendation, activityRequestGate, activityTime, activityWorker, pausedSnapshotSafe } from './liveActivity.js'
+import { activityBounds, activityChartHover, activityCharts, activityLogTime, activityPair, activityPath, activityRecommendation, activityRequestGate, activityTime, activityWorker, pausedSnapshotSafe } from './liveActivity.js'
 
 const props = defineProps({ eventVersion: Number, eventState: String, resetVersion: Number, range: Object, embedded: Boolean })
 const emit = defineEmits(['open', 'clock'])
@@ -21,6 +21,18 @@ let searchTimer
 const pageCount = computed(() => Math.max(1, Math.ceil((displayed.value?.pagination?.total || 0) / 10)))
 const bounds = computed(() => activityBounds(props.range))
 const charts = computed(() => activityCharts(displayed.value, (refreshedAt.value || now.value) / 1000))
+const hoverX = ref(null)
+const chartHover = computed(() => activityChartHover(charts.value, hoverX.value))
+function hoverChart(event) {
+  const svg = event.currentTarget
+  const matrix = svg.getScreenCTM()
+  if (!matrix) return
+  const point = svg.createSVGPoint()
+  point.x = event.clientX
+  point.y = event.clientY
+  const local = point.matrixTransform(matrix.inverse())
+  hoverX.value = local.y >= 0 && local.y <= 142 ? local.x : null
+}
 const chartTitle = computed(() => charts.value.singleDay ? t('Recorded decisions on selected date', '所选日期的已记录决策') : t('Recorded decisions in selected range', '所选日期范围的已记录决策'))
 const rows = computed(() => Array.isArray(displayed.value?.items) ? displayed.value.items.slice(0, 50) : [])
 const number = value => Number.isSafeInteger(value) && value >= 0 ? value.toLocaleString(locale.value) : '—'
@@ -132,6 +144,7 @@ function visible() {
 }
 
 function clearSnapshot() {
+  hoverX.value = null
   requestGate.cancel()
   clearTimeout(throttle)
   throttle = null
@@ -191,7 +204,7 @@ onBeforeUnmount(() => {
         <span v-if="displayed.recording_enabled === false">{{ t('Recording is off. New decisions will not appear here.', '记录已关闭，新决策不会出现在这里。') }}</span>
       </div>
       <div class="activity-charts">
-        <article class="panel"><div class="activity-chart-head"><h3>{{ chartTitle }}</h3><span class="worker-indicator" :class="`worker-${workerState}`" :title="workerHint"><span class="worker-dot"></span>{{ workerStatus }}</span></div><p class="activity-legend"><span class="line-key">{{ t('Cumulative (left)', '累计（左轴）') }}</span><span class="bar-key">{{ charts.singleDay ? t('Hourly starts (right)', '每小时开始数（右轴）') : charts.coarse ? t('Interval starts (right)', '每区间开始数（右轴）') : t('Daily starts (right)', '每日开始数（右轴）') }}</span><span>{{ t('Local time', '本地时间') }}</span></p><svg viewBox="-35 -12 670 155" role="img" :aria-label="`${chartTitle}: ${charts.total}`"><g class="activity-axis"><line x1="0" y1="120" x2="600" y2="120"/><line x1="0" y1="60" x2="600" y2="60"/><line x1="0" y1="0" x2="600" y2="0"/><text x="-7" y="124" text-anchor="end">0</text><text x="-7" y="64" text-anchor="end">{{ middleTick(charts.cumulativeMaximum) }}</text><text x="-7" y="4" text-anchor="end">{{ charts.cumulativeMaximum }}</text><text x="607" y="124">0</text><text x="607" y="64">{{ middleTick(charts.countMaximum) }}</text><text x="607" y="4">{{ charts.countMaximum }}</text><text v-for="tick in charts.ticks" :key="tick.x" :x="tick.x" y="140" :text-anchor="tick.x === 0 ? 'start' : tick.x === 600 ? 'end' : 'middle'">{{ tick.label }}</text></g><rect v-for="bar in charts.bars" :key="bar.start ?? bar.hour" :x="bar.x" :y="120 - bar.height" :width="bar.width" :height="bar.height" fill="#b6d7ec"><title>{{ bar.label || `${bar.hour}:00` }} · {{ bar.count }} {{ t('decisions', '次决策') }}</title></rect><path :d="charts.curve" fill="none" stroke="var(--orange)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><circle v-for="point in charts.points.filter((point, index, points) => index === points.length - 1 || point.total !== points[index - 1]?.total)" :key="point.x" :cx="point.x" :cy="120 - point.total * 120 / charts.cumulativeMaximum" r="2.5" fill="var(--orange)"><title>{{ chartTime(point) }} · {{ point.total }} {{ t('cumulative decisions', '累计决策') }}</title></circle></svg><p v-if="!charts.hasData" class="activity-empty">{{ t('No recorded decisions in selected range.', '所选日期范围内尚无已记录决策。') }}</p></article>
+        <article class="panel"><div class="activity-chart-head"><h3>{{ chartTitle }}</h3><span class="worker-indicator" :class="`worker-${workerState}`" :title="workerHint"><span class="worker-dot"></span>{{ workerStatus }}</span></div><p class="activity-legend"><span class="line-key">{{ t('Cumulative (left)', '累计（左轴）') }}</span><span class="bar-key">{{ charts.singleDay ? t('Hourly starts (right)', '每小时开始数（右轴）') : charts.coarse ? t('Interval starts (right)', '每区间开始数（右轴）') : t('Daily starts (right)', '每日开始数（右轴）') }}</span><span>{{ t('Local time', '本地时间') }}</span></p><div class="activity-chart-plot"><svg @pointermove="hoverChart" @pointerleave="hoverX = null" @pointercancel="hoverX = null" viewBox="-35 -12 670 155" role="img" :aria-label="`${chartTitle}: ${charts.total}`"><g class="activity-axis"><line x1="0" y1="120" x2="600" y2="120"/><line x1="0" y1="60" x2="600" y2="60"/><line x1="0" y1="0" x2="600" y2="0"/><text x="-7" y="124" text-anchor="end">0</text><text x="-7" y="64" text-anchor="end">{{ middleTick(charts.cumulativeMaximum) }}</text><text x="-7" y="4" text-anchor="end">{{ charts.cumulativeMaximum }}</text><text x="607" y="124">0</text><text x="607" y="64">{{ middleTick(charts.countMaximum) }}</text><text x="607" y="4">{{ charts.countMaximum }}</text><text v-for="tick in charts.ticks" :key="tick.x" :x="tick.x" y="140" :text-anchor="tick.x === 0 ? 'start' : tick.x === 600 ? 'end' : 'middle'">{{ tick.label }}</text></g><rect v-for="bar in charts.bars" :key="bar.start ?? bar.hour" :x="bar.x" :y="120 - bar.height" :width="bar.width" :height="bar.height" fill="#b6d7ec"><title>{{ bar.label || `${bar.hour}:00` }} · {{ bar.count }} {{ t('decisions', '次决策') }}</title></rect><path :d="charts.curve" fill="none" stroke="var(--orange)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><circle v-for="point in charts.points.filter((point, index, points) => index === points.length - 1 || point.total !== points[index - 1]?.total)" :key="point.x" :cx="point.x" :cy="120 - point.total * 120 / charts.cumulativeMaximum" r="2.5" fill="var(--orange)"><title>{{ chartTime(point) }} · {{ point.total }} {{ t('cumulative decisions', '累计决策') }}</title></circle><g v-if="chartHover" class="activity-crosshair" pointer-events="none"><line :x1="chartHover.x" y1="0" :x2="chartHover.x" y2="120"/><circle :cx="chartHover.x" :cy="chartHover.y" r="4"/></g></svg><div v-if="chartHover" class="activity-chart-tooltip" role="tooltip" :style="{ left: 'clamp(12px, calc(' + ((chartHover.x + 35) / 670 * 100) + '% ' + (chartHover.x > 300 ? '- 192px' : '+ 12px') + '), calc(100% - 192px))' }"><strong>{{ chartHover.label || chartTime(chartHover) }}</strong><span>{{ t('Cumulative decisions', '累计决策') }}<b>{{ number(chartHover.total) }}</b></span><span>{{ charts.singleDay ? t('Hourly starts', '该小时新增') : charts.coarse ? t('Interval starts', '该区间新增') : t('Daily starts', '当日新增') }}<b>{{ number(chartHover.count) }}</b></span></div></div><p v-if="!charts.hasData" class="activity-empty">{{ t('No recorded decisions in selected range.', '所选日期范围内尚无已记录决策。') }}</p></article>
       </div>
       <div ref="logPanel" class="activity-log panel" :class="{ 'log-maximized': fullscreen }" :role="fullscreen ? 'dialog' : undefined" :aria-modal="fullscreen ? true : undefined" :aria-label="t('Recorded decisions', '已记录决策')">
         <div class="panel-head log-toolbar"><h3>{{ t('Recorded decisions', '已记录决策') }}</h3><div class="log-actions"><input v-model="searchInput" type="search" maxlength="200" @input="searchLogs" :aria-label="t('Search decisions', '搜索决策')" :placeholder="t('Search task, ID or role…', '搜索任务、ID 或角色…')"/><button class="button subtle log-fullscreen" @click="toggleFullscreen" :aria-label="fullscreen ? t('Exit fullscreen', '退出全屏') : t('Fullscreen', '全屏显示')" :title="fullscreen ? t('Exit fullscreen', '退出全屏') : t('Fullscreen', '全屏显示')">{{ fullscreen ? '⊡' : '⛶' }}</button></div></div>
@@ -243,6 +256,13 @@ onBeforeUnmount(() => {
 .activity-charts h3 { margin: 0; font-size: 15px; }
 .activity-charts p { margin: 4px 0 15px; }
 .activity-charts svg { display: block; width: 100%; height: auto; overflow: visible; }
+.activity-chart-plot { position: relative; }
+.activity-crosshair line { stroke: var(--ink-soft); stroke-width: 1; stroke-dasharray: 3 3; }
+.activity-crosshair circle { fill: var(--orange); stroke: white; stroke-width: 2; }
+.activity-chart-tooltip { position: absolute; top: 8px; z-index: 2; width: 180px; max-width: calc(100% - 24px); box-sizing: border-box; padding: 10px 12px; border: 1px solid var(--line, #dce6ed); border-radius: 8px; background: white; color: var(--ink); box-shadow: 0 4px 16px #20304018; font-size: 12px; pointer-events: none; }
+.activity-chart-tooltip strong { display: block; margin-bottom: 6px; }
+.activity-chart-tooltip span { display: flex; justify-content: space-between; gap: 18px; line-height: 1.8; color: var(--ink-soft); }
+.activity-chart-tooltip b { color: var(--ink); font-variant-numeric: tabular-nums; }
 .activity-axis line { stroke: var(--line); stroke-width: 1; }
 .activity-axis text { fill: var(--ink-soft); font-size: 12px; }
 .activity-empty { margin: 0; padding: 35px 20px; color: var(--ink-soft); font-size: 12px; text-align: center; }

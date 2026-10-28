@@ -51,8 +51,8 @@ main { min-width: 0; padding: 0 42px 64px; background: var(--paper); }
 .topbar h1 { margin: 7px 0 0; font: 700 clamp(26px, 3vw, 34px)/1.2 var(--font-display); letter-spacing: -.02em; }
 .eyebrow { margin: 0; color: var(--orange-dark); font-size: 10px; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }
 .brand-tagline { font-size: 11px; font-weight: 650; letter-spacing: .02em; text-transform: none; }
-.top-actions { display: flex; align-items: center; gap: 9px; }
-.top-actions select { appearance: none; -webkit-appearance: none; width: auto; padding-right: 32px; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='m2 4 4 4 4-4' fill='none' stroke='%23586877' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; background-size: 12px 12px; }
+.top-actions { display: flex; flex-shrink: 0; align-items: center; gap: 9px; }
+.top-actions select { width: auto; min-width: 116px; }
 .live-pill { padding: 8px 11px; display: flex; gap: 7px; align-items: center; border: 1px solid var(--line); border-radius: 999px; color: var(--ink-soft); background: var(--panel); font-size: 11px; text-transform: capitalize; }
 .live-pill span { width: 6px; height: 6px; border-radius: 50%; background: var(--sage); }
 .icon-button { width: 34px; height: 34px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); cursor: pointer; font-size: 18px; }
@@ -75,6 +75,8 @@ main { min-width: 0; padding: 0 42px 64px; background: var(--paper); }
 .filter label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 input, select, textarea { width: 100%; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); background: #ffffff; }
 input, select { min-height: 38px; padding: 0 11px; }
+select { appearance: none; -webkit-appearance: none; min-width: 0; max-width: 100%; padding-right: 36px; text-overflow: ellipsis; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='m2 4 4 4 4-4' fill='none' stroke='%23586877' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; background-size: 12px 12px; }
+@media (forced-colors: active) { select { appearance: auto; -webkit-appearance: auto; background-image: none; } }
 textarea { padding: 11px; resize: vertical; line-height: 1.45; }
 .filter input { width: min(220px, 30vw); }
 .queue-filters { flex-wrap: wrap; justify-content: flex-end; }
@@ -278,8 +280,7 @@ pre { max-height: 430px; margin: 0; padding: 15px; overflow: auto; border-radius
 .overview-controls .date-range-compact { padding: 0; border: 0; background: transparent; flex-direction: column; align-items: flex-end; gap: 10px; }
 .date-select { position: relative; display: block; }
 .date-select svg { position: absolute; left: 12px; top: 11px; color: var(--ink-soft); pointer-events: none; }
-.date-select select { appearance: none; -webkit-appearance: none; height: 40px; padding: 0 34px 0 38px; min-width: 148px; }
-.date-select::after { content: ''; position: absolute; right: 14px; top: 16px; width: 6px; height: 6px; border-right: 1.5px solid var(--ink-soft); border-bottom: 1.5px solid var(--ink-soft); transform: rotate(45deg); pointer-events: none; }
+.date-select select { height: 40px; padding-left: 38px; min-width: 148px; }
 @media (max-width: 640px) {
   .overview-toolbar { align-items: flex-start; }
   .overview-label { display: none; }
@@ -330,7 +331,7 @@ details[open] > summary { margin-bottom: 16px; }
 @media (max-width: 760px) {
   .tier-grid { grid-template-columns: 1fr; }
   .topbar { gap: 10px; }
-  .top-actions select { max-width: 110px; }
+  .top-actions select { max-width: 116px; }
   .panel-head { flex-wrap: wrap; gap: 12px; }
   .case-row { grid-template-columns: 18px minmax(0,1fr) auto; }
   .case-row > .danger { grid-column: 3; }
