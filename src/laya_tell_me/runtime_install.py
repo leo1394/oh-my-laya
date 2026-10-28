@@ -10,7 +10,7 @@ from pathlib import Path
 from urllib import request
 
 
-WORKBENCH_VERSION = "2.0.3"
+WORKBENCH_VERSION = "2.0.4"
 # Release artifact bytes are verified before publication and pinned here.
 # Never replace an existing asset; publish a new tag when its bytes change.
 TRUSTED_RELEASES = {
