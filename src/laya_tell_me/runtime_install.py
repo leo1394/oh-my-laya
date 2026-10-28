@@ -14,6 +14,10 @@ WORKBENCH_VERSION = "2.0.3"
 # Release artifact bytes are verified before publication and pinned here.
 # Never replace an existing asset; publish a new tag when its bytes change.
 TRUSTED_RELEASES = {
+    "2.0.3": {
+        "url": "https://github.com/leo1394/oh-my-laya/releases/download/v2.0.3/laya-macos-arm64",
+        "sha256": "798e736234997e4e9554161b4cffea49199e80138e420d62e83c35f2cd3b2d3f",
+    },
     "2.0.2": {
         "url": "https://github.com/leo1394/oh-my-laya/releases/download/v2.0.2/laya-macos-arm64",
         "sha256": "4ef9251d67ad6af09508981c0962baf3d521af210f561d54fa4f2f41c2ae7f11",
